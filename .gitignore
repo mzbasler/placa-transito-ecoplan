@@ -1,0 +1,19 @@
+﻿# modelos (pesados)
+*.pt
+*.onnx
+weights/
+
+# dados gerados em runtime
+saidas/
+output/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# sistema
+Thumbs.db
+.DS_Store
+desktop.ini
+.env

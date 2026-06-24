@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Detector de Placas</title>
+<link rel="stylesheet" href="/vendor/leaflet.css">
+<style>
+  :root{--bg:#0b0f14;--card:#121821;--card2:#19222e;--line:#28394e;--txt:#e8eef5;
+    --muted:#6a8aa8;--accent:#27ae60;--accent2:#2ecc71;--danger:#e15b5b}
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}
+  body{font-family:Segoe UI,Roboto,system-ui,Arial,sans-serif;background:var(--bg);
+    color:var(--txt);display:flex;flex-direction:column;line-height:1.5}
+
+  /* ── HEADER ── */
+  header{height:42px;flex-shrink:0;background:#080c11;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;padding:0 14px;gap:0;z-index:100}
+  .hd-logo{font-size:13px;font-weight:700;padding:0 14px 0 4px;
+    border-right:1px solid var(--line);margin-right:2px;white-space:nowrap}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:6px;flex-shrink:0}
+  .dot.on{background:var(--accent2);box-shadow:0 0 7px var(--accent2)}
+  .menu-wrap{position:relative}
+  .menu-btn{background:none;border:none;color:var(--muted);padding:0 11px;height:42px;
+    font-size:13px;cursor:pointer;display:flex;align-items:center;gap:4px;
+    transition:color .1s,background .1s}
+  .menu-btn:hover,.menu-btn.open{background:var(--card2);color:var(--txt)}
+  .menu-drop{position:absolute;top:42px;left:0;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;min-width:210px;
+    box-shadow:0 10px 28px rgba(0,0,0,.65);z-index:500;overflow:hidden;padding:4px 0}
+  .menu-item{padding:9px 15px;font-size:13px;cursor:pointer;
+    display:flex;align-items:center;gap:10px;color:var(--txt)}
+  .menu-item:hover{background:var(--card2);color:var(--accent2)}
+  .menu-sep{height:1px;background:var(--line);margin:4px 0}
+  .hd-folders{display:flex;gap:6px;align-items:center;overflow:hidden;
+    padding:0 8px;max-width:500px}
+  .hd-tag{background:#0e2218;border:1px solid #1d4d31;border-radius:11px;
+    padding:2px 8px 2px 11px;font-size:12px;display:flex;align-items:center;
+    gap:5px;white-space:nowrap;flex-shrink:0}
+  .hd-tag span{color:var(--accent2);overflow:hidden;text-overflow:ellipsis;max-width:220px}
+  .hd-tag .rm{background:none;border:none;color:#4a6a5a;cursor:pointer;
+    font-size:15px;line-height:1;padding:0}
+  .hd-tag .rm:hover{color:var(--danger)}
+  .hd-space{flex:1}
+  .hd-btn{padding:5px 15px;border:none;border-radius:6px;font-size:13px;font-weight:600;
+    cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;margin-left:6px}
+  #btnStop{background:var(--danger);color:#fff}
+  #btnStop:hover{background:#c44}
+  #btnGo{background:var(--accent);color:#fff}
+  #btnGo:hover:not(:disabled){background:var(--accent2)}
+  #btnGo:disabled{background:#1a2a36;color:#3a5a6a;cursor:not-allowed}
+
+  /* ── LAYOUT ── */
+  .panels{flex:1;display:flex;overflow:hidden;min-height:0}
+  .panel{display:flex;flex-direction:column;overflow:hidden;padding:14px;gap:10px}
+  .panel-left{flex:1;min-width:0;border-right:1px solid var(--line)}
+  .panel-right{flex:1;min-width:0}
+
+  /* placeholders */
+  .placeholder{flex:1;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:10px;opacity:.3}
+  .placeholder .ico{font-size:38px}
+  .placeholder p{font-size:13px;color:var(--muted)}
+
+  /* progresso */
+  .prog-wrap{flex:1;display:flex;flex-direction:column;gap:10px;min-height:0;overflow:hidden}
+  .step{font-size:13px;color:var(--accent2);font-weight:600;flex-shrink:0}
+  .bar{height:9px;background:var(--card2);border-radius:5px;overflow:hidden;
+    border:1px solid var(--line);flex-shrink:0}
+  .bar>i{display:block;height:100%;width:0;
+    background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s}
+  .bar.indet>i{width:35%;animation:slide 1.2s infinite ease-in-out}
+  @keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
+  .stat{display:flex;flex-shrink:0;border:1px solid var(--line);
+    border-radius:8px;overflow:hidden;background:var(--card)}
+  .stat div{flex:1;padding:6px 8px;font-size:11px;color:var(--muted);
+    border-right:1px solid var(--line);text-align:center}
+  .stat div:last-child{border-right:none}
+  .stat b{display:block;font-size:16px;color:var(--txt);font-weight:700;line-height:1.3}
+  .live-img-box{flex:1;min-height:0;overflow:hidden;border-radius:8px;
+    border:1px solid var(--line);background:#000}
+  .live-img-box img{width:100%;height:100%;object-fit:contain;display:block}
+  .live-cap{font-size:11px;color:var(--muted);flex-shrink:0}
+  .log{height:120px;flex-shrink:0;background:#0a1018;border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px;font-family:Consolas,monospace;font-size:11px;
+    color:#9fd9b4;overflow-y:auto;white-space:pre-wrap}
+
+  /* resultados */
+  .res-wrap{flex:1;display:flex;flex-direction:column;gap:8px;min-height:0;overflow:hidden}
+  .res-hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex-shrink:0}
+  .pill{display:inline-block;padding:2px 10px;border-radius:18px;font-size:13px;
+    background:#173a28;color:var(--accent2);font-weight:600}
+  button.sec{padding:5px 12px;background:var(--card2);color:var(--txt);
+    border:1px solid var(--line);border-radius:7px;font-size:12px;cursor:pointer;font-weight:600}
+  button.sec:hover{border-color:var(--accent)}
+  .tally{font-size:12px;color:var(--muted);flex-shrink:0;min-height:16px}
+  .tabs{display:flex;gap:6px;flex-shrink:0}
+  .tab{padding:4px 12px;border-radius:16px;background:var(--card2);
+    border:1px solid var(--line);font-size:12px;cursor:pointer;color:var(--muted)}
+  .tab.sel{background:#173a28;border-color:var(--accent);color:var(--accent2)}
+  .table-wrap{flex:1;min-height:0;overflow-y:auto;
+    border:1px solid var(--line);border-radius:8px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;background:var(--card);
+    position:sticky;top:0;z-index:1}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  tr.okrow td{background:rgba(39,174,96,.07)}
+  tr.falsa td{background:rgba(225,91,91,.08)}
+  td img{height:36px;border-radius:4px;border:1px solid var(--line);
+    cursor:pointer;vertical-align:middle}
+  .mini{padding:2px 8px;font-size:12px;border-radius:5px;margin-right:3px;
+    border:1px solid var(--line);background:var(--card2);color:var(--muted);
+    cursor:pointer;font-weight:600}
+  .mini.y.on{background:#173a28;color:var(--accent2);border-color:var(--accent)}
+  .mini.n.on{background:#3a1c1c;color:var(--danger);border-color:var(--danger)}
+  a{color:var(--accent2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  #mapWrap{flex-shrink:0;height:260px}
+  #map{height:100%;border-radius:8px;border:1px solid var(--line)}
+  .leaflet-popup-content{color:#111}
+
+  /* modais */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.78);display:flex;
+    align-items:center;justify-content:center;z-index:999}
+  .modal .box{background:var(--card);border:1px solid var(--line);border-radius:13px;
+    padding:22px;max-width:92vw;width:520px;max-height:84vh;
+    display:flex;flex-direction:column;gap:12px}
+  .modal .box h3{font-size:15px;flex-shrink:0}
+  .mf-sub{font-size:12px;color:var(--muted);flex-shrink:0}
+  .mf-list{flex:1;overflow-y:auto;border:1px solid var(--line);
+    border-radius:7px;background:var(--card2);min-height:0}
+  .mf-item{padding:9px 14px;border-bottom:1px solid var(--line)}
+  .mf-item:last-child{border-bottom:none}
+  .mf-item label{display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px}
+  .mf-item label:hover{color:var(--accent2)}
+  .mf-item input[type=checkbox]{width:14px;height:14px;
+    accent-color:var(--accent);flex-shrink:0}
+  .mf-actions{display:flex;gap:8px;justify-content:flex-end;flex-shrink:0}
+  .seq-wrap{overflow-y:auto;flex:1;min-height:0}
+  .seq{display:flex;gap:10px;flex-wrap:wrap}
+  .seq figure{margin:0;text-align:center}
+  .seq img{height:110px;border-radius:7px;border:2px solid var(--line)}
+  .seq img.best{border-color:var(--accent2)}
+  .seq figcaption{font-size:11px;color:var(--muted)}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ── -->
+<header>
+  <span class="dot" id="dot"></span>
+  <div class="hd-logo">Detector de Placas</div>
+
+  <div class="menu-wrap" id="menuAbrir">
+    <button class="menu-btn" id="menuAbrirBtn" onclick="toggleMenu('menuAbrir')">📁 Abrir ▾</button>
+    <div class="menu-drop hidden" id="menuAbrirDrop">
+      <div class="menu-item" onclick="abrirPicker();fecharMenus()">🖥️&nbsp; Selecionar pasta…</div>
+      <div class="menu-sep"></div>
+      <div class="menu-item" onclick="abrirKnown();fecharMenus()">🗄️&nbsp; Pastas conhecidas</div>
+    </div>
+  </div>
+
+  <div class="hd-folders" id="hdFolders"></div>
+  <div class="hd-space"></div>
+  <button class="hd-btn hidden" id="btnStop">⏹ Parar</button>
+  <button class="hd-btn" id="btnGo" disabled>▶ Detectar</button>
+</header>
+
+<!-- ── DOIS PAINÉIS ── -->
+<div class="panels">
+
+  <!-- ESQUERDA -->
+  <div class="panel panel-left">
+
+    <!-- idle esquerdo -->
+    <div class="placeholder" id="leftIdle">
+      <div class="ico">📷</div>
+      <p>Abra uma pasta para começar</p>
+    </div>
+
+    <!-- progresso -->
+    <div class="prog-wrap hidden" id="progWrap">
+      <div class="step" id="stepTxt">iniciando…</div>
+      <div class="bar indet" id="bar"><i></i></div>
+      <div class="stat">
+        <div>Quadros<b id="stProc">0/0</b></div>
+        <div>Detectadas<b id="stFound">0</b></div>
+        <div>Tempo<b id="stEl">0s</b></div>
+        <div>Falta<b id="stEta">—</b></div>
+      </div>
+      <div class="live-img-box"><img id="liveImg" alt=""></div>
+      <div class="live-cap">Última placa detectada (ao vivo)</div>
+      <div class="log" id="logBox"></div>
+    </div>
+
+  </div>
+
+  <!-- DIREITA -->
+  <div class="panel panel-right">
+
+    <!-- idle direito -->
+    <div class="placeholder" id="rightIdle">
+      <div class="ico">📋</div>
+      <p>Os resultados aparecerão aqui</p>
+    </div>
+
+    <!-- resultados -->
+    <div class="res-wrap hidden" id="resWrap">
+      <div class="res-hd">
+        <span class="pill" id="nUni">0 placas</span>
+        <button class="sec" id="btnRefs">💾 Salvar referências</button>
+        <button class="sec" id="btnMapa">🗺️ Mapa</button>
+      </div>
+      <div class="tally" id="tally"></div>
+      <div class="tabs">
+        <div class="tab sel" data-tab="todas">Todas</div>
+        <div class="tab" data-tab="duvidosas">Só as duvidosas</div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>#</th><th>Foto</th><th>km</th><th>Lado</th>
+            <th title="Confiança do modelo">Conf.</th>
+            <th title="Placa não cortada na borda">Compl.</th>
+            <th title="Quadros em que apareceu">Qts</th>
+            <th title="Foto inteira com caixa marcada">Ref</th>
+            <th>Conferir</th>
+          </tr></thead>
+          <tbody id="tBody"></tbody>
+        </table>
+      </div>
+      <div id="mapWrap" class="hidden"><div id="map"></div></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Modal: sequência -->
+<div class="modal hidden" id="modal" onclick="if(event.target===this)this.classList.add('hidden')">
+  <div class="box">
+    <h3 id="mTit"></h3>
+    <div class="seq-wrap"><div class="seq" id="mSeq"></div></div>
+    <div class="mf-actions">
+      <button class="sec" onclick="document.getElementById('modal').classList.add('hidden')">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: pastas conhecidas -->
+<div class="modal hidden" id="modalFolders" onclick="if(event.target===this)this.classList.add('hidden')">
+  <div class="box">
+    <h3>Pastas conhecidas</h3>
+    <div class="mf-sub" id="mfRoot"></div>
+    <div class="mf-list" id="mfList">
+      <div style="padding:14px;color:var(--muted);font-size:13px">Carregando…</div>
+    </div>
+    <div class="mf-actions">
+      <button class="sec" onclick="document.getElementById('modalFolders').classList.add('hidden')">Cancelar</button>
+      <button class="sec" style="border-color:var(--accent);color:var(--accent2)" onclick="confirmarFolders()">✓ Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<script src="/vendor/leaflet.js"></script>
+<script>
+const AJUSTE={conf:0.20,min_quadros:3,min_aspecto:0.45,max_aspecto:4.0,
+  min_area:0.0002,janela_km:0.06,lado:"ambos"};
+const IMGSZ=1536;
+let polling=null,placas=[],conf={},tab="todas",map=null,mapLayers=[];
+let selectedFolders=[],knownFolders=[];
+
+// ── menus ──
+function toggleMenu(id){
+  const drop=document.getElementById(id+'Drop'),btn=document.getElementById(id+'Btn');
+  const open=!drop.classList.contains('hidden');
+  fecharMenus();
+  if(!open){drop.classList.remove('hidden');btn.classList.add('open');}
+}
+function fecharMenus(){
+  document.querySelectorAll('.menu-drop').forEach(d=>d.classList.add('hidden'));
+  document.querySelectorAll('.menu-btn').forEach(b=>b.classList.remove('open'));
+}
+document.addEventListener('click',e=>{if(!e.target.closest('.menu-wrap'))fecharMenus();});
+
+// ── pastas conhecidas ──
+fetch('/api/folders').then(r=>r.json()).then(d=>{
+  knownFolders=d.pastas||[];
+  document.getElementById('mfRoot').textContent=d.root?'Raiz: '+d.root:'';
+});
+
+// ── seleção ──
+function addFolder(path){
+  if(!path||selectedFolders.includes(path))return;
+  selectedFolders.push(path);renderHdFolders();
+}
+function removeFolder(idx){
+  selectedFolders.splice(idx,1);renderHdFolders();
+}
+function shortPath(p){
+  const pts=p.replace(/\\/g,'/').split('/').filter(Boolean);
+  return pts.length>1?pts.slice(-2).join('/'):p;
+}
+function renderHdFolders(){
+  document.getElementById('hdFolders').innerHTML=selectedFolders.map((f,i)=>
+    `<div class="hd-tag">
+       <span title="${f.replace(/"/g,'&quot;')}">${shortPath(f)}</span>
+       <button class="rm" onclick="removeFolder(${i})">×</button>
+     </div>`
+  ).join('');
+  document.getElementById('btnGo').disabled=!selectedFolders.length;
+}
+
+// ── picker ──
+function abrirPicker(){
+  const btn=document.getElementById('menuAbrirBtn');
+  btn.textContent='⏳ Abrindo…';btn.disabled=true;
+  fetch('/api/picker').then(r=>r.json()).then(d=>{if(d.path)addFolder(d.path);})
+    .catch(()=>{}).finally(()=>{btn.textContent='📁 Abrir ▾';btn.disabled=false;});
+}
+
+// ── modal pastas conhecidas ──
+function abrirKnown(){
+  renderMfList();
+  document.getElementById('modalFolders').classList.remove('hidden');
+}
+function renderMfList(){
+  const el=document.getElementById('mfList');
+  if(!knownFolders.length){
+    el.innerHTML='<div style="padding:14px;color:var(--muted);font-size:13px">Nenhuma pasta encontrada.</div>';
+    return;
+  }
+  el.innerHTML=knownFolders.map(p=>
+    `<div class="mf-item"><label>
+       <input type="checkbox" value="${p.replace(/"/g,'&quot;')}"
+         ${selectedFolders.includes(p)?'checked':''}>
+       <span title="${p}">${shortPath(p)}</span>
+     </label></div>`
+  ).join('');
+}
+function confirmarFolders(){
+  document.querySelectorAll('#mfList input:checked').forEach(c=>addFolder(c.value));
+  document.getElementById('modalFolders').classList.add('hidden');
+}
+
+// ── tabs ──
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('sel'));
+  t.classList.add('sel');tab=t.dataset.tab;renderTable();
+});
+
+// ── detectar ──
+document.getElementById('btnGo').onclick=()=>{
+  if(!selectedFolders.length)return;
+  fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({folders:selectedFolders,imgsz:IMGSZ,limite:0})})
+  .then(r=>r.json()).then(d=>{
+    if(!d.ok){alert('Não iniciou: '+(d.msg||''));return;}
+    document.getElementById('leftIdle').classList.add('hidden');
+    document.getElementById('progWrap').classList.remove('hidden');
+    document.getElementById('btnGo').classList.add('hidden');
+    document.getElementById('btnStop').classList.remove('hidden');
+    document.getElementById('dot').classList.add('on');
+    if(polling)clearInterval(polling);
+    polling=setInterval(poll,900);poll();
+  });
+};
+
+// ── parar ──
+function resetUI(){
+  if(polling){clearInterval(polling);polling=null;}
+  document.getElementById('progWrap').classList.add('hidden');
+  document.getElementById('leftIdle').classList.remove('hidden');
+  document.getElementById('btnGo').classList.remove('hidden');
+  document.getElementById('btnStop').classList.add('hidden');
+  document.getElementById('btnGo').disabled=!selectedFolders.length;
+  document.getElementById('dot').classList.remove('on');
+}
+document.getElementById('btnStop').onclick=()=>{
+  fetch('/api/stop',{method:'POST'}).catch(()=>{}).finally(resetUI);
+};
+
+// ── polling ──
+function fmt(s){s=+s||0;return s<60?s+'s':Math.floor(s/60)+'m'+String(s%60).padStart(2,'0')+'s';}
+function poll(){
+  fetch('/api/status').then(r=>r.json()).then(s=>{
+    document.getElementById('stepTxt').textContent=s.step;
+    document.getElementById('stProc').textContent=s.processed+'/'+(s.total||'?');
+    document.getElementById('stFound').textContent=s.found;
+    document.getElementById('stEl').textContent=fmt(s.elapsed_s);
+    document.getElementById('stEta').textContent=s.running?fmt(s.eta_s):'—';
+    const bar=document.getElementById('bar'),fill=bar.querySelector('i');
+    if(s.total>0){bar.classList.remove('indet');fill.style.width=(100*s.processed/s.total)+'%';}
+    else bar.classList.add('indet');
+    document.getElementById('logBox').textContent=(s.log||[]).join('\n');
+    document.getElementById('logBox').scrollTop=9e9;
+    const li=document.getElementById('liveImg'),im=new Image();
+    im.onload=()=>li.src=im.src;im.src='/api/latest?t='+Date.now();
+    if(s.error){clearInterval(polling);polling=null;alert('Erro: '+s.error);resetUI();}
+    if(s.done){
+      clearInterval(polling);polling=null;
+      document.getElementById('btnGo').classList.remove('hidden');
+      document.getElementById('btnStop').classList.add('hidden');
+      document.getElementById('btnGo').disabled=false;
+      document.getElementById('dot').classList.remove('on');
+      const b2=document.getElementById('bar');
+      b2.classList.remove('indet');b2.querySelector('i').style.width='100%';
+      const tot=s.total||s.processed;
+      document.getElementById('stProc').textContent=tot+'/'+tot;
+      document.getElementById('stepTxt').textContent='concluído ✓';
+      document.getElementById('rightIdle').classList.add('hidden');
+      document.getElementById('resWrap').classList.remove('hidden');
+      refine();
+    }
+  });
+}
+
+// ── refine ──
+function refine(){
+  fetch('/api/refine',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(AJUSTE)})
+  .then(r=>r.json()).then(d=>{
+    if(!d.ok)return;
+    placas=d.placas||[];conf={};
+    document.getElementById('nUni').textContent=placas.length+' placas';
+    renderTable();renderTally();
+  });
+}
+function renderTable(){
+  const tb=document.getElementById('tBody');tb.innerHTML='';
+  placas.forEach((p,i)=>{
+    if(tab==='duvidosas'&&p.conf>=0.30)return;
+    const tr=document.createElement('tr');
+    if(conf[i]==='real')tr.classList.add('okrow');
+    if(conf[i]==='falsa')tr.classList.add('falsa');
+    tr.innerHTML=`<td>${i+1}</td>
+      <td><img src="/api/file?path=${encodeURIComponent(p.crop)}" onclick="seq(${i})"></td>
+      <td>${p.km.toFixed(3)}</td><td>${p.lado}</td><td>${p.conf.toFixed(2)}</td>
+      <td>${p.completa?'sim':'não'}</td><td>${p.n_quadros}</td>
+      <td><a href="/api/referencia?i=${i}" target="_blank" title="Foto inteira com caixa">🔍</a></td>
+      <td><button class="mini y ${conf[i]==='real'?'on':''}" onclick="mark(${i},'real')">✓</button>
+          <button class="mini n ${conf[i]==='falsa'?'on':''}" onclick="mark(${i},'falsa')">✗</button></td>`;
+    tb.appendChild(tr);
+  });
+}
+function mark(i,tipo){
+  if(conf[i]===tipo)delete conf[i];else conf[i]=tipo;
+  renderTable();renderTally();
+}
+function renderTally(){
+  let a=0,b=0;Object.values(conf).forEach(v=>{if(v==='real')a++;else if(v==='falsa')b++;});
+  const el=document.getElementById('tally');
+  if(!a&&!b){el.textContent='';return;}
+  const prec=Math.round(100*a/(a+b));
+  el.innerHTML=`${a+b}/${placas.length} conferidas · ✓${a} · ✗${b} · `+
+    `<b style="color:var(--accent2)">precisão: ${prec}%</b>`;
+}
+
+// ── sequência ──
+function seq(i){
+  fetch('/api/sequence?i='+i).then(r=>r.json()).then(d=>{
+    const sq=d.seq||[];if(!sq.length){alert('Sem quadros.');return;}
+    const best=Math.max(...sq.map(s=>s.completa*1e6+s.area));
+    document.getElementById('mTit').textContent=`Sequência — ${sq.length} quadros`;
+    document.getElementById('mSeq').innerHTML=sq.map(s=>{
+      const isb=(s.completa*1e6+s.area)===best;
+      return `<figure><img class="${isb?'best':''}"
+        src="/api/file?path=${encodeURIComponent(s.crop)}">
+        <figcaption>km ${s.km}<br>${s.conf} ${s.completa?'· compl.':'· cort.'}</figcaption>
+        </figure>`;
+    }).join('');
+    document.getElementById('modal').classList.remove('hidden');
+  });
+}
+
+// ── salvar refs ──
+document.getElementById('btnRefs').onclick=()=>{
+  fetch('/api/salvar_referencias',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.ok)alert('Salvei '+d.n+' fotos em:\n'+d.path);
+    else alert('Falha: '+(d.msg||''));
+  });
+};
+
+// ── mapa ──
+document.getElementById('btnMapa').onclick=()=>{
+  const w=document.getElementById('mapWrap');
+  w.classList.toggle('hidden');
+  if(!w.classList.contains('hidden'))
+    fetch('/api/mapa').then(r=>r.json()).then(drawMap);
+};
+function drawMap(d){
+  const pts=d.track||[],pl=d.placas||[];
+  if(!pts.length){alert('Sem GPX — mapa indisponível.');return;}
+  if(!map){
+    map=L.map('map');
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      {maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+  }
+  mapLayers.forEach(l=>map.removeLayer(l));mapLayers=[];
+  const line=L.polyline(pts,{color:'#3aa0ff',weight:3}).addTo(map);
+  mapLayers.push(line);
+  pl.forEach(p=>{
+    const m=L.circleMarker([p.lat,p.lon],
+      {radius:6,color:'#2ecc71',fillColor:'#2ecc71',fillOpacity:.9})
+      .bindPopup('km '+p.km+' · lado '+p.lado).addTo(map);
+    mapLayers.push(m);
+  });
+  map.fitBounds(line.getBounds());
+  setTimeout(()=>map.invalidateSize(),200);
+}
+</script>
+</body>
+</html>
