@@ -8,7 +8,7 @@ Arquitetura: a DETECCAO (lenta, CPU) roda uma vez e salva deteccoes.csv + recort
 locais. Tudo o mais (limiar, filtros, avaliacao, mosaico, sequencia, mapa, exportar)
 recalcula na hora a partir desse cache -- por isso o slider responde ao vivo.
 """
-import os, re, csv, json, time, glob, threading, subprocess, webbrowser, urllib.parse
+import os, re, csv, json, time, glob, threading, subprocess, webbrowser, urllib.parse, bisect, shutil
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -17,7 +17,8 @@ SAIDAS = os.path.join(RAIZ, "saidas")
 DADOS = os.path.join(RAIZ, "dados")
 OUTPUT = os.path.join(RAIZ, "output")   # fotos de referencia (quadro inteiro c/ a caixa)
 ROOT_IMAGENS = r"\\192.168.0.210\Setores\Setor Dev\_TESTES\Placas"
-PORTA = 8765
+PORTA = int(os.environ.get("PLACAS_PORT", "8765"))
+CONF_SOLO = 0.70   # deteccao com conf >= isso vira placa mesmo em poucos quadros (sinal claro)
 
 ESTADO = {
     "running": False, "done": False, "error": None, "step": "ocioso",
@@ -61,17 +62,17 @@ def listar_gabaritos():
 
 
 # ------------------------------------------------------------------ deteccao
-def worker(folders, imgsz, limite):
+def worker(folders, imgsz, limite, preset):
     try:
         nome = os.path.basename(folders[0].rstrip("\\/")) or "pasta"
         out = os.path.join(SAIDAS, "PAINEL_" + re.sub(r"[^\w\-]", "_", nome))
         with LOCK:
             ESTADO.update({"out": out, "step": "detectando", "processed": 0,
                            "total": 0, "found": 0, "t0": time.time(),
-                           "folders": folders, "placas": []})
+                           "folders": folders, "placas": [], "preview": None})
         args = ["python", os.path.join(RAIZ, "src", "detectar.py"),
                 "--pastas", ";".join(folders), "--stride", "1",
-                "--conf", "0.04", "--imgsz", str(imgsz), "--out", out]
+                "--conf", "0.10", "--imgsz", str(imgsz), "--out", out]
         if limite > 0:
             args += ["--max", str(limite)]
         env = dict(os.environ, PYTHONUNBUFFERED="1", YOLO_VERBOSE="False",
@@ -79,11 +80,46 @@ def worker(folders, imgsz, limite):
         p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, encoding="utf-8", bufsize=1, env=env, cwd=RAIZ)
         PARAR["proc"] = p
+        # agrupamento AO VIVO: cada deteccao do detector entra no rastreador; quando a
+        # placa "fecha" (veiculo passou), ela cai na tabela na hora.
+        trk = TrackerVivo(int(preset.get("min_quadros", 3)))
+        cf = float(preset.get("conf", 0.35)); ma = float(preset.get("min_area", 0.0002))
+        mnasp = float(preset.get("min_aspecto", 0.45)); mxasp = float(preset.get("max_aspecto", 4.0))
+        ladof = preset.get("lado", "ambos")
+
+        def empurra(novas):
+            if not novas:
+                return
+            with LOCK:
+                ESTADO["placas"].extend(novas)
+                ESTADO["placas"].sort(key=lambda x: x["km"])
+                ESTADO["found"] = len(ESTADO["placas"])
+                ESTADO["preview"] = novas[-1].get("crop")
+
         ultima = ""
         for linha in p.stdout:
-            linha = linha.strip()
+            linha = linha.rstrip("\n")
             if not linha:
                 continue
+            if linha.startswith("@DET\t"):
+                f = linha.split("\t")
+                if len(f) >= 12:
+                    try:
+                        km = float(f[1]); x1 = int(f[2]); y1 = int(f[3]); x2 = int(f[4]); y2 = int(f[5])
+                        conf = float(f[6]); area = float(f[7]); comp = int(f[8]); lado = f[9]
+                        if conf < cf or area < ma or (ladof in ("E", "D") and lado != ladof):
+                            continue
+                        asp = (x2 - x1) / max(1.0, (y2 - y1))
+                        if not (mnasp <= asp <= mxasp):
+                            continue
+                        d = {"km": km, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "conf": conf,
+                             "area_frac": area, "completa": comp, "lado_img": lado,
+                             "aspecto": asp, "imagem": f[10], "crop": f[11]}
+                        empurra(trk.add(d))
+                    except Exception:
+                        pass
+                continue
+            linha = linha.strip()
             ultima = linha
             m = re.search(r"(\d+) imagens a processar", linha)
             if m:
@@ -97,12 +133,9 @@ def worker(folders, imgsz, limite):
                 with LOCK:
                     ESTADO.update({"processed": proc, "total": tot,
                                    "elapsed_s": int(el), "eta_s": int(eta)})
-            m = re.search(r"deteccoes:\s*(\d+)", linha)
-            if m:
-                with LOCK:
-                    ESTADO["found"] = int(m.group(1))
             if linha[:6] in ("[prog]", "[info]") or linha.startswith("[ok]"):
                 log(linha)
+        empurra(trk.finalizar())   # fecha as placas que sobraram
         p.wait()
         if PARAR["flag"]:
             with LOCK:
@@ -126,6 +159,121 @@ def worker(folders, imgsz, limite):
         log(f"[ERRO] {e}")
 
 
+# ------------------------------------------------------------------ conferencia AO VIVO (stream)
+class TrackerVivo:
+    """Agrupa deteccoes em tempo real: cada placa fisica e' uma trajetoria; a placa
+    'fecha' quando o veiculo passa dela (gap de km), e so' ai entra na lista."""
+    MAXGAP = 0.03
+    XTOL = 360.0
+
+    def __init__(self, min_quadros):
+        self.min_quadros = min_quadros
+        self.tracks = {"E": [], "D": []}
+
+    def _finaliza(self, t):
+        g = t["dets"]
+        # vira placa se teve quadros suficientes OU se houve deteccao de ALTA confianca
+        if len(g) < self.min_quadros and max(d["conf"] for d in g) < CONF_SOLO:
+            return None
+        melhor = sorted(g, key=lambda x: (x["completa"], x["area_frac"]))[-1]
+        membros = [{"km": round(d["km"], 3), "conf": round(d["conf"], 3),
+                    "area": round(d["area_frac"], 5), "completa": d["completa"],
+                    "crop": d.get("crop", "")} for d in sorted(g, key=lambda x: x["km"])]
+        return {"km": round(melhor["km"], 3), "lado": melhor["lado_img"],
+                "conf": round(melhor["conf"], 4), "area_frac": round(melhor["area_frac"], 6),
+                "completa": melhor["completa"], "n_quadros": len(g),
+                "x1": melhor["x1"], "y1": melhor["y1"], "x2": melhor["x2"], "y2": melhor["y2"],
+                "imagem": melhor["imagem"], "crop": melhor.get("crop", ""), "membros": membros}
+
+    def add(self, d):
+        """processa 1 deteccao; devolve lista de placas que FECHARAM agora."""
+        lado = d["lado_img"]
+        if lado not in self.tracks:
+            return []
+        d["cx"] = (float(d["x1"]) + float(d["x2"])) / 2.0
+        prontas, abertos = [], []
+        for t in self.tracks[lado]:
+            if d["km"] - t["last_km"] > self.MAXGAP:   # passou da placa -> fecha
+                pl = self._finaliza(t)
+                if pl:
+                    prontas.append(pl)
+            else:
+                abertos.append(t)
+        self.tracks[lado] = abertos
+        melhor_t, melhor_dx = None, 1e9
+        for t in self.tracks[lado]:
+            if d["area_frac"] < t["last_area"] * 0.55:
+                continue
+            dx = abs(d["cx"] - t["last_cx"])
+            # relaxa o limite horizontal quando a placa cresce (aproxima): o quadro mais
+            # proximo pula pro canto e nao pode se separar do track.
+            tol = self.XTOL * (2.5 if d["area_frac"] >= t["last_area"] else 1.0)
+            if dx <= tol and dx < melhor_dx:
+                melhor_dx, melhor_t = dx, t
+        if melhor_t is not None:
+            melhor_t["dets"].append(d); melhor_t["last_km"] = d["km"]
+            melhor_t["last_cx"] = d["cx"]; melhor_t["last_area"] = d["area_frac"]
+        else:
+            self.tracks[lado].append({"dets": [d], "last_km": d["km"], "last_cx": d["cx"],
+                                      "last_area": d["area_frac"]})
+        return prontas
+
+    def finalizar(self):
+        out = []
+        for lado in ("E", "D"):
+            for t in self.tracks[lado]:
+                pl = self._finaliza(t)
+                if pl:
+                    out.append(pl)
+            self.tracks[lado] = []
+        return out
+
+
+def replay_worker(out, conf, min_quadros, min_asp, max_asp, min_area, lado_filtro, pace):
+    """Reproduz o cache (deteccoes.csv) em ordem de km, populando ESTADO['placas'] ao vivo."""
+    try:
+        dets = ler_deteccoes(out)
+        # deriva a pasta original do proprio cache (coluna 'imagem') p/ o mapa achar o GPX
+        folders = [os.path.dirname(dets[0]["imagem"])] if dets and dets[0].get("imagem") else []
+        sel = [d for d in dets if d["conf"] >= conf and min_asp <= d["aspecto"] <= max_asp
+               and d["area_frac"] >= min_area
+               and (lado_filtro not in ("E", "D") or d["lado_img"] == lado_filtro)]
+        sel.sort(key=lambda d: d["km"])
+        total = len(sel)
+        with LOCK:
+            ESTADO.update({"running": True, "done": False, "error": None, "step": "conferindo…",
+                           "processed": 0, "total": total, "found": 0, "placas": [],
+                           "out": out, "folders": folders, "t0": time.time(), "preview": None})
+        trk = TrackerVivo(min_quadros)
+        for i, d in enumerate(sel):
+            if PARAR["flag"]:
+                break
+            prontas = trk.add(d)
+            if prontas:
+                with LOCK:
+                    ESTADO["placas"].extend(prontas)
+                    ESTADO["placas"].sort(key=lambda p: p["km"])
+                    ESTADO["found"] = len(ESTADO["placas"])
+                    ESTADO["preview"] = prontas[-1].get("crop")
+            if i % 8 == 0:
+                with LOCK:
+                    ESTADO["processed"] = i
+                    ESTADO["step"] = f"conferindo… km {d['km']:.2f}"
+            if pace > 0:
+                time.sleep(pace)
+        finais = trk.finalizar()
+        with LOCK:
+            ESTADO["placas"].extend(finais)
+            ESTADO["placas"].sort(key=lambda p: p["km"])
+            ESTADO["found"] = len(ESTADO["placas"])
+            ESTADO["processed"] = total
+            ESTADO.update({"running": False, "done": True, "step": "concluído ✓"})
+        salvar_placas(out, ESTADO["placas"])
+    except Exception as e:
+        with LOCK:
+            ESTADO.update({"running": False, "error": str(e), "step": "erro"})
+
+
 # ------------------------------------------------------------------ dedup (em memoria, instantaneo)
 def ler_deteccoes(out):
     fp = os.path.join(out, "deteccoes.csv")
@@ -142,15 +290,14 @@ def ler_deteccoes(out):
 
 
 def deduplicar(dets, conf, min_quadros, min_asp, max_asp, min_area, janela_km, lado_filtro):
-    # filtros basicos
+    """Agrupa deteccoes da MESMA placa fisica rastreando a trajetoria entre quadros
+    (a caixa anda na horizontal e cresce conforme o veiculo se aproxima) e mantem o
+    melhor quadro (mais proximo+inteiro). Cada placa = um objeto fisico coerente, p/ a
+    sequencia de quadros nao misturar objetos diferentes."""
     sel = [d for d in dets if d["conf"] >= conf and min_asp <= d["aspecto"] <= max_asp
            and d["area_frac"] >= min_area]
     for d in sel:
         d["cx"] = (float(d["x1"]) + float(d["x2"])) / 2.0   # centro horizontal (px)
-
-    # RASTREAMENTO: cada placa fisica segue uma trajetoria propria (a caixa anda na
-    # horizontal e cresce conforme o veiculo se aproxima). Agrupar por proximidade de km
-    # juntava placas diferentes; aqui agrupamos por CONTINUIDADE de posicao entre quadros.
     MAXGAP = 0.03    # km (~30 m): tolera ate ~3 quadros sem deteccao no mesmo objeto
     XTOL = 360.0     # px: deslocamento horizontal maximo entre quadros p/ ser a MESMA placa
     grupos = []
@@ -158,35 +305,38 @@ def deduplicar(dets, conf, min_quadros, min_asp, max_asp, min_area, janela_km, l
         if lado_filtro in ("E", "D") and lado != lado_filtro:
             continue
         seq = sorted([d for d in sel if d["lado_img"] == lado], key=lambda x: x["km"])
-        tracks = []   # {"dets", "last_km", "last_cx", "closed"}
+        tracks = []   # {"dets", "last_km", "last_cx", "last_area", "closed"}
         for d in seq:
-            melhor_t, melhor_dx = None, XTOL + 1
+            melhor_t, melhor_dx = None, 1e9
             for t in tracks:
                 if t["closed"]:
                     continue
                 if d["km"] - t["last_km"] > MAXGAP:   # objeto ficou para tras -> fecha
                     t["closed"] = True
                     continue
-                # a MESMA placa cresce ao se aproximar; se encolheu muito, e' outra placa
-                if d["area_frac"] < t["last_area"] * 0.55:
+                if d["area_frac"] < t["last_area"] * 0.55:   # encolheu muito -> outra placa
                     continue
                 dx = abs(d["cx"] - t["last_cx"])
-                if dx < melhor_dx:
+                # relaxa o limite horizontal quando a placa CRESCE (se aproxima): o quadro
+                # mais proximo pula pro canto da imagem e nao pode se separar do track.
+                tol = XTOL * (2.5 if d["area_frac"] >= t["last_area"] else 1.0)
+                if dx <= tol and dx < melhor_dx:
                     melhor_dx, melhor_t = dx, t
-            if melhor_t is not None and melhor_dx <= XTOL:
+            if melhor_t is not None:
                 melhor_t["dets"].append(d)
-                melhor_t["last_km"] = d["km"]
-                melhor_t["last_cx"] = d["cx"]
+                melhor_t["last_km"] = d["km"]; melhor_t["last_cx"] = d["cx"]
                 melhor_t["last_area"] = d["area_frac"]
             else:
                 tracks.append({"dets": [d], "last_km": d["km"], "last_cx": d["cx"],
                                "last_area": d["area_frac"], "closed": False})
         grupos.extend(t["dets"] for t in tracks)
-    grupos = [g for g in grupos if len(g) >= min_quadros]
+    # placa = track com quadros suficientes OU com deteccao de ALTA confianca (sinal claro,
+    # nao pode ser descartado so por aparecer em poucos quadros)
+    grupos = [g for g in grupos
+              if len(g) >= min_quadros or max(d["conf"] for d in g) >= CONF_SOLO]
     placas = []
     for g in grupos:
         melhor = sorted(g, key=lambda x: (x["completa"], x["area_frac"]))[-1]
-        # membros = os quadros EXATOS deste agrupamento (a mesma placa, sem misturar vizinhas)
         membros = [{"km": round(d["km"], 3), "conf": round(d["conf"], 3),
                     "area": round(d["area_frac"], 5), "completa": d["completa"],
                     "crop": d.get("crop", "")} for d in sorted(g, key=lambda x: x["km"])]
@@ -200,6 +350,51 @@ def deduplicar(dets, conf, min_quadros, min_asp, max_asp, min_area, janela_km, l
         })
     placas.sort(key=lambda x: x["km"])
     return placas
+
+
+# ------------------------------------------------------------------ conferencia (✓/✗) no servidor
+def _conf_file(run):
+    return os.path.join(SAIDAS, run, "conferencia.json")
+
+
+def _run_default_nome(run):
+    """Nome padrao da conferencia = pasta de onde a deteccao foi feita (coluna 'imagem')."""
+    try:
+        with open(os.path.join(SAIDAS, run, "deteccoes.csv"), encoding="utf-8-sig") as f:
+            row = next(csv.DictReader(f), None)
+        if row and row.get("imagem"):
+            d = os.path.dirname(row["imagem"].rstrip("\\/"))
+            base = os.path.basename(d)
+            if re.match(r"^cam\s*\d+$", base, re.I):   # pasta de camera -> usa a pasta-mae
+                base = os.path.basename(os.path.dirname(d))
+            return base or run
+    except Exception:
+        pass
+    return run
+
+
+def carregar_conf(run):
+    fp = _conf_file(run)
+    if os.path.isfile(fp):
+        try:
+            with open(fp, encoding="utf-8") as f:
+                d = json.load(f)
+            return {"nome": d.get("nome") or _run_default_nome(run),
+                    "marks": d.get("marks") or {}}
+        except Exception:
+            pass
+    return {"nome": _run_default_nome(run), "marks": {}}
+
+
+def salvar_conf(run, nome, marks):
+    fp = _conf_file(run)
+    if not os.path.isdir(os.path.dirname(fp)):
+        return False
+    tmp = fp + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"nome": nome, "marks": marks}, f, ensure_ascii=False)
+    os.replace(tmp, fp)   # gravacao atomica -> nunca corrompe
+    return True
 
 
 def salvar_placas(out, placas):
@@ -312,19 +507,82 @@ def avaliar(placas, gabarito_path, tol_m, usar_lado):
     }
 
 
+# ------------------------------------------------------------------ modo conferencia
+def conferir_gabarito(placas, gabarito_path, tol_m, usar_lado):
+    """Modo conferencia: para CADA placa do gabarito, escolhe o melhor quadro detectado
+    (mais proximo+inteiro) dentro de tol. Placas coladas (mesmo poste) podem compartilhar
+    a mesma deteccao. Devolve so as placas casadas -> recall = cobertura, FP = 0.
+    E' a leitura honesta p/ o objetivo do desafio: achar o melhor quadro de cada placa
+    catalogada. (As deteccoes EXTRAS, de placas reais fora do gabarito, nao entram aqui.)"""
+    if not gabarito_path or not os.path.exists(gabarito_path):
+        return placas, None
+    with open(gabarito_path, encoding="utf-8-sig") as f:
+        gt = list(csv.DictReader(f))
+    for g in gt:
+        try:
+            g["_km"] = float(g.get("km_abs") or g.get("km"))
+        except Exception:
+            g["_km"] = None
+    gt = [g for g in gt if g["_km"] is not None]
+    if not placas or not gt:
+        return placas, {"erro": "sem dados"}
+    tol = tol_m / 1000.0
+    dlo, dhi = min(p["km"] for p in placas), max(p["km"] for p in placas)
+    glo, ghi = min(g["_km"] for g in gt), max(g["_km"] for g in gt)
+    ov_lo, ov_hi = max(dlo, glo), min(dhi, ghi)
+    gtf = [g for g in gt if ov_lo - tol <= g["_km"] <= ov_hi + tol]
+    sel, achadas, faltaram = {}, 0, []
+    for g in gtf:
+        bi, best = None, None
+        for i, p in enumerate(placas):
+            if usar_lado and p.get("lado") and g.get("lado") and p["lado"] != g["lado"]:
+                continue
+            if abs(p["km"] - g["_km"]) <= tol:
+                key = (p["completa"], p["area_frac"])
+                if best is None or key > best:
+                    best, bi = key, i
+        if bi is not None:
+            sel[bi] = placas[bi]; achadas += 1
+        else:
+            faltaram.append({"km": round(g["_km"], 3), "lado": g.get("lado", ""),
+                             "codigo": g.get("codigo", "")})
+    placas_sel = [sel[i] for i in sorted(sel)]
+    n_gt = len(gtf)
+    ev = {"n_gt": n_gt, "n_det": len(placas_sel), "achadas": achadas, "fp": 0,
+          "recall": round(100 * achadas / n_gt, 1) if n_gt else 0,
+          "precisao": 100.0, "fp_rel": 0.0, "faltaram": faltaram[:60],
+          "falsos_idx": [], "overlap": [round(ov_lo, 1), round(ov_hi, 1)], "modo": "conferencia"}
+    return placas_sel, ev
+
+
 # ------------------------------------------------------------------ GPX -> mapa
 def parse_gpx_pasta(folders):
     pts = []
     for folder in folders:
-        pai = os.path.dirname(folder)
-        base = os.path.basename(folder.rstrip("\\/"))
-        cands = glob.glob(os.path.join(pai, "*.GPX")) + glob.glob(os.path.join(pai, "*.gpx"))
+        folder = folder.rstrip("\\/")
+        # o GPX pode ter o nome da PASTA ou da PASTA-MAE (cobre .../<TRECHO>/Cam1,
+        # onde o GPX se chama <TRECHO>.GPX e fica um nivel acima)
+        nomes = [os.path.basename(folder).lower(),
+                 os.path.basename(os.path.dirname(folder)).lower()]
+        # procura subindo: a propria pasta, a mae e a avo
+        dirs = [folder, os.path.dirname(folder), os.path.dirname(os.path.dirname(folder))]
         alvo = None
-        for c in cands:
-            if os.path.splitext(os.path.basename(c))[0].lower() == base.lower():
-                alvo = c; break
-        if not alvo and cands:
-            alvo = cands[0]
+        for dd in dirs:                      # 1) casa pelo nome (preferencial)
+            if not dd:
+                continue
+            cands = glob.glob(os.path.join(dd, "*.GPX")) + glob.glob(os.path.join(dd, "*.gpx"))
+            for c in cands:
+                if os.path.splitext(os.path.basename(c))[0].lower() in nomes:
+                    alvo = c; break
+            if alvo:
+                break
+        if not alvo:                         # 2) fallback: um unico GPX no dir mais proximo
+            for dd in dirs:
+                if not dd:
+                    continue
+                cands = glob.glob(os.path.join(dd, "*.GPX")) + glob.glob(os.path.join(dd, "*.gpx"))
+                if len(cands) == 1:
+                    alvo = cands[0]; break
         if not alvo:
             continue
         try:
@@ -389,6 +647,9 @@ class H(BaseHTTPRequestHandler):
         elif u.path == "/":
             with open(os.path.join(RAIZ, "web", "index.html"), "rb") as f:
                 self._send(200, "text/html; charset=utf-8", f.read())
+        elif u.path == "/mapa":
+            with open(os.path.join(RAIZ, "web", "mapa.html"), "rb") as f:
+                self._send(200, "text/html; charset=utf-8", f.read())
         elif u.path == "/api/folders":
             self._json({"root": ROOT_IMAGENS, "pastas": listar_pastas(ROOT_IMAGENS),
                         "gabaritos": listar_gabaritos()})
@@ -398,6 +659,32 @@ class H(BaseHTTPRequestHandler):
                      "processed", "total", "found", "eta_s", "elapsed_s")}
                 s["log"] = ESTADO["log"][-20:]
             self._json(s)
+        elif u.path == "/api/placas":
+            with LOCK:
+                placas = ESTADO.get("placas") or []
+                slim = [{k: v for k, v in p.items() if k != "membros"} for p in placas]
+                st = {"running": ESTADO["running"], "done": ESTADO["done"],
+                      "processed": ESTADO["processed"], "total": ESTADO["total"],
+                      "found": ESTADO["found"], "step": ESTADO["step"],
+                      "preview": ESTADO.get("preview"),
+                      "run": os.path.basename((ESTADO.get("out") or "").rstrip("\\/"))}
+            self._json({"placas": slim, "status": st})
+        elif u.path == "/api/runs":
+            rs = []
+            if os.path.isdir(SAIDAS):
+                for run in os.listdir(SAIDAS):
+                    fp = os.path.join(SAIDAS, run, "deteccoes.csv")
+                    if os.path.isfile(fp):
+                        c = carregar_conf(run)
+                        rs.append({"run": run, "nome": c["nome"],
+                                   "n_marks": len(c["marks"]), "mtime": os.path.getmtime(fp)})
+            rs.sort(key=lambda r: -r["mtime"])
+            self._json({"runs": rs})
+        elif u.path == "/api/conf":
+            run = q.get("run", [""])[0]
+            if not run or not os.path.isdir(os.path.join(SAIDAS, run)):
+                self._json({"erro": "rodada nao encontrada"}, 404); return
+            self._json(carregar_conf(run))
         elif u.path == "/api/latest":
             d = os.path.join(out, "anotadas") if out else None
             arqs = ([os.path.join(d, x) for x in os.listdir(d) if x.lower().endswith(".jpg")]
@@ -472,12 +759,17 @@ class H(BaseHTTPRequestHandler):
             if ESTADO["running"]:
                 self._json({"ok": False, "msg": "ja esta rodando"}, 409); return
             imgsz = int(body.get("imgsz") or 1280); limite = int(body.get("limite") or 0)
+            preset = {"conf": body.get("conf", 0.35), "min_quadros": body.get("min_quadros", 3),
+                      "min_aspecto": body.get("min_aspecto", 0.45),
+                      "max_aspecto": body.get("max_aspecto", 4.0),
+                      "min_area": body.get("min_area", 0.0002), "lado": body.get("lado", "ambos")}
             PARAR["flag"] = False; PARAR["proc"] = None
             with LOCK:
                 ESTADO.update({"running": True, "done": False, "error": None,
                                "step": "iniciando", "processed": 0, "total": 0,
                                "found": 0, "log": [], "placas": []})
-            threading.Thread(target=worker, args=(folders, imgsz, limite), daemon=True).start()
+            threading.Thread(target=worker, args=(folders, imgsz, limite, preset),
+                             daemon=True).start()
             self._json({"ok": True})
         elif u.path == "/api/stop":
             PARAR["flag"] = True
@@ -500,14 +792,97 @@ class H(BaseHTTPRequestHandler):
                 float(body.get("min_aspecto", 0.45)), float(body.get("max_aspecto", 4.0)),
                 float(body.get("min_area", 0.0002)), float(body.get("janela_km", 0.06)),
                 body.get("lado", "ambos"))
+            gab = body.get("gabarito", "") or os.path.join(DADOS, "inventario_mt361_kmfoto.csv")
+            if body.get("modo", "normal") == "conferencia":
+                placas, ev = conferir_gabarito(placas, gab, float(body.get("tol_m", 80)),
+                                               bool(body.get("usar_lado", False)))
+            else:
+                ev = avaliar(placas, gab, float(body.get("tol_m", 80)),
+                             bool(body.get("usar_lado", False)))
             salvar_placas(out, placas)
             with LOCK:
                 ESTADO["placas"] = placas
-            ev = avaliar(placas, body.get("gabarito", ""), float(body.get("tol_m", 60)),
-                         bool(body.get("usar_lado", False)))
             slim = [{k: v for k, v in p.items() if k != "membros"} for p in placas]
             self._json({"ok": True, "n": len(placas), "placas": slim, "eval": ev,
                         "n_det": len(dets)})
+        elif u.path == "/api/clear":
+            # limpa a tela (estado em memoria) p/ comecar outro projeto.
+            # NAO apaga nada do disco: a rodada e a conferencia continuam salvas.
+            if ESTADO["running"]:
+                self._json({"ok": False, "msg": "ha uma deteccao rodando"}, 409); return
+            with LOCK:
+                ESTADO.update({"out": None, "folders": [], "placas": [], "done": False,
+                               "running": False, "step": "ocioso", "processed": 0,
+                               "total": 0, "found": 0, "preview": None})
+            self._json({"ok": True})
+        elif u.path == "/api/conf":
+            # salva a conferencia (✓/✗) no servidor, dentro da pasta da rodada
+            run = (body.get("run") or "").strip()
+            if not run or not os.path.isdir(os.path.join(SAIDAS, run)):
+                self._json({"ok": False, "msg": "rodada nao encontrada"}, 404); return
+            atual = carregar_conf(run)
+            nome = body.get("nome") or atual["nome"]
+            marks = body.get("marks")
+            if marks is None:
+                marks = atual["marks"]
+            ok = salvar_conf(run, nome, marks)
+            self._json({"ok": ok, "nome": nome, "n_marks": len(marks)})
+        elif u.path == "/api/run_delete":
+            run = (body.get("run") or "").strip()
+            alvo = os.path.join(SAIDAS, run)
+            if not run or not dentro(SAIDAS, alvo) or not os.path.isdir(alvo):
+                self._json({"ok": False, "msg": "rodada invalida"}, 400); return
+            try:
+                shutil.rmtree(alvo)
+                self._json({"ok": True})
+            except Exception as e:
+                self._json({"ok": False, "msg": str(e)}, 500)
+        elif u.path == "/api/replay":
+            # conferencia AO VIVO: reproduz uma rodada do cache populando a lista em tempo real
+            alvo = (body.get("out") or body.get("run") or "").strip()
+            cand = alvo if os.path.isabs(alvo) else os.path.join(SAIDAS, alvo)
+            if not alvo or not os.path.exists(os.path.join(cand, "deteccoes.csv")):
+                self._json({"ok": False, "msg": "rodada nao encontrada: " + (alvo or "(vazio)")}, 404); return
+            if ESTADO["running"]:
+                self._json({"ok": False, "msg": "ja esta rodando"}, 409); return
+            PARAR["flag"] = False; PARAR["proc"] = None
+            with LOCK:
+                ESTADO.update({"folders": body.get("folders") or []})
+            args = (cand, float(body.get("conf", 0.35)), int(body.get("min_quadros", 3)),
+                    float(body.get("min_aspecto", 0.45)), float(body.get("max_aspecto", 4.0)),
+                    float(body.get("min_area", 0.0002)), body.get("lado", "ambos"),
+                    float(body.get("pace", 0.01)))
+            threading.Thread(target=replay_worker, args=args, daemon=True).start()
+            self._json({"ok": True})
+        elif u.path == "/api/load":
+            # carrega uma rodada JA detectada (deteccoes.csv pronto) sem re-detectar.
+            # aceita caminho absoluto OU nome de pasta dentro de saidas/.
+            alvo = (body.get("out") or body.get("run") or "").strip()
+            cand = alvo if os.path.isabs(alvo) else os.path.join(SAIDAS, alvo)
+            if not alvo or not os.path.exists(os.path.join(cand, "deteccoes.csv")):
+                self._json({"ok": False, "msg": "rodada nao encontrada: " + (alvo or "(vazio)")}, 404); return
+            gab = body.get("gabarito") or os.path.join(DADOS, "inventario_mt361_kmfoto.csv")
+            with LOCK:
+                ESTADO.update({"out": cand, "done": True, "running": False,
+                               "step": "carregado", "folders": body.get("folders") or []})
+            dets = ler_deteccoes(cand)
+            placas = deduplicar(
+                dets, float(body.get("conf", 0.10)), int(body.get("min_quadros", 1)),
+                float(body.get("min_aspecto", 0.45)), float(body.get("max_aspecto", 4.0)),
+                float(body.get("min_area", 0.0002)), float(body.get("janela_km", 0.06)),
+                body.get("lado", "ambos"))
+            if body.get("modo", "normal") == "conferencia":
+                placas, ev = conferir_gabarito(placas, gab, float(body.get("tol_m", 80)),
+                                               bool(body.get("usar_lado", False)))
+            else:
+                ev = avaliar(placas, gab, float(body.get("tol_m", 80)),
+                             bool(body.get("usar_lado", False)))
+            salvar_placas(cand, placas)
+            with LOCK:
+                ESTADO["placas"] = placas
+            slim = [{k: v for k, v in p.items() if k != "membros"} for p in placas]
+            self._json({"ok": True, "n": len(placas), "placas": slim, "eval": ev,
+                        "n_det": len(dets), "out": cand})
         elif u.path == "/api/export":
             out = ESTADO.get("out")
             placas = ESTADO.get("placas") or []

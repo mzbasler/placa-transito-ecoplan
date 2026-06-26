@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Detector de placas SEM treino, usando YOLO-World (vocabulario aberto).
-Damos o texto 'traffic sign' como classe; o modelo detecta placas sem
-nenhum dado rotulado. Roda em CPU (mais lento, mas funciona nesta maquina).
+Detector de placas usando um modelo YOLO TREINADO (modelos/best.pt, 1 classe: 'placa').
+Roda em CPU (mais lento, mas funciona nesta maquina).
 
 Saidas:
   - <out>/deteccoes.csv : uma linha por deteccao (imagem, km, bbox, conf, area, completa)
@@ -23,6 +22,10 @@ def km_do_caminho(caminho):
     return round(float(mo[-1]), 3) if mo else 0.0
 
 EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
+
+# modelo treinado (best.pt) ao lado do projeto: src/ -> ../modelos/best.pt
+MODELO_PADRAO = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "modelos", "best.pt")
 
 def coleta_imagens(args):
     if args.lista:
@@ -50,9 +53,9 @@ def main():
     ap.add_argument("--lista", default="")
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--max", type=int, default=0)
-    ap.add_argument("--conf", type=float, default=0.04)
+    ap.add_argument("--conf", type=float, default=0.10)
     ap.add_argument("--imgsz", type=int, default=1280)
-    ap.add_argument("--modelo", default="yolov8s-worldv2.pt")
+    ap.add_argument("--modelo", default=MODELO_PADRAO)
     ap.add_argument("--out", required=True)
     ap.add_argument("--borda", type=int, default=12, help="margem px p/ considerar placa 'cortada'")
     args = ap.parse_args()
@@ -64,17 +67,11 @@ def main():
         sys.exit("[erro] nenhuma imagem encontrada")
 
     import cv2
-    from ultralytics import YOLOWorld
-    modelo = YOLOWorld(args.modelo)
-    # Prompts ESPECIFICOS: o YOLO-World da confianca muito maior a placas redondas/
-    # regulamentacao quando recebe os tipos (ex.: "60" passou de 0.09 -> 0.84).
-    modelo.set_classes([
-        "traffic sign", "road sign",
-        "speed limit sign", "stop sign", "yield sign",
-        "warning sign", "no overtaking sign", "prohibition sign",
-        "regulatory traffic sign", "directional sign", "information sign",
-    ])
-    print(f"[info] modelo {args.modelo} carregado; prompts especificos de placa")
+    from ultralytics import YOLO
+    if not os.path.isfile(args.modelo):
+        sys.exit(f"[erro] modelo nao encontrado: {args.modelo}")
+    modelo = YOLO(args.modelo)
+    print(f"[info] modelo treinado carregado: {args.modelo} (classes: {modelo.names})")
 
     crops_dir = os.path.join(args.out, "crops")
     os.makedirs(crops_dir, exist_ok=True)
@@ -125,6 +122,10 @@ def main():
             w.writerow([caminho, km, int(x1), int(y1), int(x2), int(y2),
                         round(conf, 4), round(area_frac, 6), completa, lado_img,
                         crop_path])
+            # emite a deteccao AO VIVO p/ o painel (worker agrupa em tempo real)
+            print("@DET\t" + "\t".join(str(v) for v in [
+                km, int(x1), int(y1), int(x2), int(y2), round(conf, 4),
+                round(area_frac, 6), completa, lado_img, caminho, crop_path]), flush=True)
             n_det += 1
             cor = (0, 200, 0) if completa else (0, 165, 255)
             cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), cor, 4)

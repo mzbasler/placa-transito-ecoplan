@@ -1,13 +1,13 @@
 # Detector de Placas de Sinalização Vertical
 
-Painel web local para detecção automática de placas de trânsito em imagens do PavScan. Usa **YOLO-World** (vocabulário aberto) — nenhum treino ou rotulagem necessários.
+Painel web local para detecção automática de placas de trânsito em imagens do PavScan. Usa um modelo **YOLO treinado** (`modelos/best.pt`, 1 classe: `placa`).
 
 ---
 
 ## Como funciona
 
 1. Você aponta uma pasta com imagens (JPG, PNG, BMP, TIF, WEBP)
-2. O modelo detecta placas quadro a quadro
+2. O modelo treinado (`modelos/best.pt`) detecta placas quadro a quadro
 3. O sistema agrupa detecções da mesma placa física e mantém apenas o melhor quadro (mais próximo e completo)
 4. Os resultados ficam disponíveis em tempo real no painel
 
@@ -24,7 +24,7 @@ Painel web local para detecção automática de placas de trânsito em imagens d
 pip install ultralytics opencv-python openpyxl numpy
 ```
 
-> O `ultralytics` baixa automaticamente o modelo `yolov8s-worldv2.pt` e os pesos CLIP na primeira execução (~340 MB no total).
+> O modelo treinado fica em `modelos/best.pt` (já incluído, ~22 MB). Não há download automático nem necessidade de GPU.
 
 ---
 
@@ -71,6 +71,8 @@ O painel abre automaticamente em `http://127.0.0.1:8765`
 ```
 ├── app.py                   # servidor HTTP + toda a lógica de negócio
 ├── INICIAR_PAINEL.bat       # atalho para Windows
+├── modelos/
+│   └── best.pt              # modelo YOLO treinado (1 classe: placa)
 ├── dados/
 │   └── inventario_mt361.csv # gabarito de referência (151 placas reais, MT-361)
 ├── src/
@@ -86,7 +88,6 @@ Pastas geradas em runtime (ignoradas pelo git):
 ```
 saidas/    # deteccoes.csv, recortes e imagens anotadas por rodada
 output/    # fotos de referência com caixa marcada
-weights/   # pesos CLIP (baixados automaticamente)
 ```
 
 ---

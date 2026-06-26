@@ -94,6 +94,24 @@
     border:1px solid var(--line);border-radius:7px;font-size:12px;cursor:pointer;font-weight:600}
   button.sec:hover{border-color:var(--accent)}
   .tally{font-size:12px;color:var(--muted);flex-shrink:0;min-height:16px}
+  .evalbox{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 2px;flex-shrink:0}
+  .ev{padding:3px 10px;border-radius:7px;font-size:13px;font-weight:700;
+    background:var(--card2);border:1px solid var(--line);color:var(--txt)}
+  .ev small{font-weight:500;color:var(--muted)}
+  .ev.good{background:#173a28;border-color:#2f7d52;color:#7ee2a8}
+  .ev.bad{background:#3a1717;border-color:#7d2f2f;color:#e88}
+  .ctrls{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:4px 0;
+    font-size:12px;color:var(--muted);flex-shrink:0}
+  .ctrls label{display:flex;align-items:center;gap:6px}
+  .ctrls input[type=range]{width:110px}
+  .ctrls b{color:var(--txt);min-width:42px;display:inline-block}
+  .rod-item{display:flex;align-items:center;gap:8px;padding:7px 4px;border-bottom:1px solid var(--line)}
+  .rod-nome{flex:1;min-width:120px;background:var(--card2);color:var(--txt);
+    border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:13px;font-weight:600}
+  .rod-nome:focus{outline:none;border-color:var(--accent)}
+  .rod-meta{font-size:11px;color:var(--muted);white-space:nowrap}
+  .rod-meta code{color:var(--muted)}
+  .rod-del{color:#e88;border-color:#7d2f2f}
   .tabs{display:flex;gap:6px;flex-shrink:0}
   .tab{padding:4px 12px;border-radius:16px;background:var(--card2);
     border:1px solid var(--line);font-size:12px;cursor:pointer;color:var(--muted)}
@@ -117,8 +135,14 @@
   .mini.n.on{background:#3a1c1c;color:var(--danger);border-color:var(--danger)}
   a{color:var(--accent2);text-decoration:none}
   a:hover{text-decoration:underline}
-  #mapWrap{flex-shrink:0;height:260px}
+  #mapWrap{flex-shrink:0;height:260px;position:relative}
+  #btnMapExpand{position:absolute;top:8px;right:8px;z-index:600;padding:5px 10px;
+    background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:7px;
+    font-size:12px;font-weight:600;cursor:pointer}
+  #btnMapExpand:hover{border-color:var(--accent);color:var(--accent2)}
   #map{height:100%;border-radius:8px;border:1px solid var(--line)}
+  .cam-marker{background:none;border:none}
+  .cam-marker svg{filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}
   .leaflet-popup-content{color:#111}
 
   /* modais */
@@ -166,6 +190,7 @@
   <div class="hd-folders" id="hdFolders"></div>
   <div class="hd-space"></div>
   <button class="hd-btn hidden" id="btnStop">⏹ Parar</button>
+  <button class="hd-btn" id="btnLoad" title="Recarregar uma detecção já feita (do cache, sem re-detectar)">📂 Rodadas</button>
   <button class="hd-btn" id="btnGo" disabled>▶ Detectar</button>
 </header>
 
@@ -211,9 +236,17 @@
     <div class="res-wrap hidden" id="resWrap">
       <div class="res-hd">
         <span class="pill" id="nUni">0 placas</span>
+        <button class="sec" id="btnLimpar" title="Limpar a tela pra começar outro projeto (a conferência fica salva em Rodadas)">🧹 Limpar</button>
+        <button class="sec" id="btnSaveConf">💾 Salvar conferência</button>
+        <button class="sec" id="btnImportConf">📥 Importar</button>
+        <input type="file" id="fileImport" accept=".json" style="display:none">
         <button class="sec" id="btnRefs">💾 Salvar referências</button>
         <button class="sec" id="btnMapa">🗺️ Mapa</button>
       </div>
+      <div id="evalBox" class="evalbox hidden"></div>
+      <!-- preset travado: conf 0.10 / min_quadros 1 / area 0.00003 / janela 0.025 (em AJUSTE).
+           controles ocultos de proposito — o usuario nao precisa configurar nada. -->
+      <div class="ctrls hidden" id="ctrls"></div>
       <div class="tally" id="tally"></div>
       <div class="tabs">
         <div class="tab sel" data-tab="todas">Todas</div>
@@ -232,7 +265,10 @@
           <tbody id="tBody"></tbody>
         </table>
       </div>
-      <div id="mapWrap" class="hidden"><div id="map"></div></div>
+      <div id="mapWrap" class="hidden">
+        <button id="btnMapExpand" title="Abrir o mapa em uma janela cheia">⛶ Tela cheia</button>
+        <div id="map"></div>
+      </div>
     </div>
 
   </div>
@@ -264,10 +300,25 @@
   </div>
 </div>
 
+<!-- Modal: rodadas / conferencias -->
+<div class="modal hidden" id="modalRodadas" onclick="if(event.target===this)this.classList.add('hidden')">
+  <div class="box">
+    <h3>Rodadas / Conferências</h3>
+    <div class="mf-sub">Selecione uma conferência pra abrir. O nome pode ser editado; por padrão é o da pasta da detecção.</div>
+    <div class="mf-list" id="rodList">
+      <div style="padding:14px;color:var(--muted);font-size:13px">Carregando…</div>
+    </div>
+    <div class="mf-actions">
+      <button class="sec" onclick="document.getElementById('modalRodadas').classList.add('hidden')">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <script src="/vendor/leaflet.js"></script>
 <script>
-const AJUSTE={conf:0.20,min_quadros:3,min_aspecto:0.45,max_aspecto:4.0,
-  min_area:0.0002,janela_km:0.06,lado:"ambos"};
+const AJUSTE={conf:0.35,min_quadros:3,min_aspecto:0.45,max_aspecto:4.0,
+  min_area:0.0002,janela_km:0.06,lado:"ambos",modo:"normal"};
+const TOL_M=60;  // tolerancia de casamento km (offset survey vs oficial)
 const IMGSZ=1536;
 let polling=null,placas=[],conf={},tab="todas",map=null,mapLayers=[];
 let selectedFolders=[],knownFolders=[];
@@ -290,6 +341,22 @@ fetch('/api/folders').then(r=>r.json()).then(d=>{
   knownFolders=d.pastas||[];
   document.getElementById('mfRoot').textContent=d.root?'Raiz: '+d.root:'';
 });
+
+// ao abrir: tela LIMPA. Rodadas finalizadas NAO carregam sozinhas (so via 📂 Rodadas).
+// Unica excecao: se houver uma DETECCAO em andamento, reconecta ao progresso ao vivo.
+fetch('/api/placas').then(r=>r.json()).then(d=>{
+  const st=d.status||{};
+  if(st.running){
+    if(st.run)RUNKEY=st.run;
+    document.getElementById('leftIdle')?.classList.add('hidden');
+    document.getElementById('progWrap').classList.remove('hidden');
+    document.getElementById('rightIdle').classList.add('hidden');
+    document.getElementById('resWrap').classList.remove('hidden');
+    document.getElementById('dot').classList.add('on');
+    if(polling)clearInterval(polling);
+    polling=setInterval(poll,700);poll();
+  }
+}).catch(()=>{});
 
 // ── seleção ──
 function addFolder(path){
@@ -351,20 +418,25 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   t.classList.add('sel');tab=t.dataset.tab;renderTable();
 });
 
-// ── detectar ──
+// ── detectar (popula a tabela AO VIVO conforme detecta) ──
 document.getElementById('btnGo').onclick=()=>{
   if(!selectedFolders.length)return;
+  placas=[];conf={};renderTable();renderTally();
+  document.getElementById('nUni').textContent='0 placas';
   fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({folders:selectedFolders,imgsz:IMGSZ,limite:0})})
+    body:JSON.stringify(Object.assign({},AJUSTE,{folders:selectedFolders,imgsz:IMGSZ,limite:0}))})
   .then(r=>r.json()).then(d=>{
     if(!d.ok){alert('Não iniciou: '+(d.msg||''));return;}
     document.getElementById('leftIdle').classList.add('hidden');
     document.getElementById('progWrap').classList.remove('hidden');
+    document.getElementById('rightIdle').classList.add('hidden');
+    document.getElementById('resWrap').classList.remove('hidden');
+    document.getElementById('evalBox').classList.add('hidden');
     document.getElementById('btnGo').classList.add('hidden');
     document.getElementById('btnStop').classList.remove('hidden');
     document.getElementById('dot').classList.add('on');
     if(polling)clearInterval(polling);
-    polling=setInterval(poll,900);poll();
+    polling=setInterval(poll,700);poll();
   });
 };
 
@@ -398,6 +470,7 @@ function poll(){
     document.getElementById('logBox').scrollTop=9e9;
     const li=document.getElementById('liveImg'),im=new Image();
     im.onload=()=>li.src=im.src;im.src='/api/latest?t='+Date.now();
+    puxarPlacasVivo();   // tabela cresce em tempo real
     if(s.error){clearInterval(polling);polling=null;alert('Erro: '+s.error);resetUI();}
     if(s.done){
       clearInterval(polling);polling=null;
@@ -409,25 +482,178 @@ function poll(){
       b2.classList.remove('indet');b2.querySelector('i').style.width='100%';
       const tot=s.total||s.processed;
       document.getElementById('stProc').textContent=tot+'/'+tot;
-      document.getElementById('stepTxt').textContent='concluído ✓';
+      document.getElementById('stepTxt').textContent='concluído ✓ — '+placas.length+' placas';
       document.getElementById('rightIdle').classList.add('hidden');
       document.getElementById('resWrap').classList.remove('hidden');
-      refine();
+      setTimeout(puxarPlacasVivo,300);   // garante as ultimas
     }
   });
 }
+// busca as placas que ja entraram e atualiza a tabela (sem perder os ✓/✗)
+function puxarPlacasVivo(){
+  fetch('/api/placas').then(r=>r.json()).then(d=>{
+    if(d.status&&d.status.run)RUNKEY=d.status.run;
+    const np=d.placas||[];
+    if(np.length!==placas.length){
+      placas=np;renderTable();
+      document.getElementById('nUni').textContent=placas.length+' placas';
+    }
+    if(RUNKEY&&_confLoaded!==RUNKEY&&placas.length)loadConf(RUNKEY);  // marcas do servidor (1x)
+  }).catch(()=>{});
+}
 
-// ── refine ──
+// ── refine (recalcula do cache + avalia recall/FP) ──
+function refineBody(){
+  return Object.assign({},AJUSTE,{tol_m:TOL_M,usar_lado:false});
+}
 function refine(){
   fetch('/api/refine',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(AJUSTE)})
+    body:JSON.stringify(refineBody())})
   .then(r=>r.json()).then(d=>{
     if(!d.ok)return;
     placas=d.placas||[];conf={};
     document.getElementById('nUni').textContent=placas.length+' placas';
+    renderEval(d.eval,d.n_det);
     renderTable();renderTally();
   });
 }
+
+// ── conferencia (✓/✗) SALVA NO SERVIDOR — ligada a rodada, sobrevive a tudo ──
+let RUNKEY='', RUNNOME='', _saveT=null, _confLoaded='';
+function cropKey(c){return (c||'').split(/[\\/]/).pop();}
+function marksObj(){const m={};placas.forEach((p,i)=>{if(conf[i])m[cropKey(p.crop)]=conf[i];});return m;}
+function saveMarks(){
+  if(!RUNKEY)return;
+  clearTimeout(_saveT);
+  _saveT=setTimeout(()=>{
+    fetch('/api/conf',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({run:RUNKEY,nome:RUNNOME,marks:marksObj()})}).catch(()=>{});
+  },350);
+}
+function applyMarks(m){conf={};placas.forEach((p,i)=>{const k=cropKey(p.crop);if(m&&m[k])conf[i]=m[k];});}
+function loadConf(run){
+  if(!run)return;
+  fetch('/api/conf?run='+encodeURIComponent(run)).then(r=>r.json()).then(c=>{
+    if(c&&!c.erro){RUNNOME=c.nome||run;applyMarks(c.marks);_confLoaded=run;renderTable();renderTally();}
+  }).catch(()=>{});
+}
+
+// ── modal Rodadas: selecionar / renomear / excluir ──
+function abrirRodadas(){
+  const el=document.getElementById('rodList');
+  el.innerHTML='<div style="padding:14px;color:var(--muted);font-size:13px">Carregando…</div>';
+  document.getElementById('modalRodadas').classList.remove('hidden');
+  fetch('/api/runs').then(r=>r.json()).then(d=>{
+    const runs=d.runs||[];
+    if(!runs.length){el.innerHTML='<div style="padding:14px;color:var(--muted)">Nenhuma rodada. Rode uma detecção primeiro.</div>';return;}
+    el.innerHTML=runs.map(r=>`
+      <div class="rod-item" data-run="${r.run.replace(/"/g,'&quot;')}">
+        <input class="rod-nome" value="${(r.nome||'').replace(/"/g,'&quot;')}" title="Editar nome da conferência">
+        <span class="rod-meta">${r.n_marks} ✓/✗ · <code>${r.run}</code></span>
+        <button class="sec rod-open">Abrir</button>
+        <button class="sec rod-del" title="Excluir rodada">🗑</button>
+      </div>`).join('');
+    el.querySelectorAll('.rod-item').forEach(it=>{
+      const run=it.dataset.run, inp=it.querySelector('.rod-nome');
+      inp.onchange=()=>fetch('/api/conf',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({run:run,nome:inp.value})}).catch(()=>{});
+      it.querySelector('.rod-open').onclick=()=>{RUNNOME=inp.value;
+        document.getElementById('modalRodadas').classList.add('hidden');reloadRun(run);};
+      it.querySelector('.rod-del').onclick=()=>{
+        if(!confirm('Excluir a rodada "'+inp.value+'"? Apaga as detecções E a conferência dela.'))return;
+        fetch('/api/run_delete',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({run:run})}).then(r=>r.json()).then(()=>abrirRodadas());
+      };
+    });
+  }).catch(e=>{el.innerHTML='Erro: '+e;});
+}
+function reloadRun(run){
+  placas=[];conf={};_confLoaded='';renderTable();renderTally();
+  document.getElementById('leftIdle')?.classList.add('hidden');
+  document.getElementById('rightIdle').classList.add('hidden');
+  document.getElementById('resWrap').classList.remove('hidden');
+  document.getElementById('progWrap').classList.remove('hidden');
+  document.getElementById('evalBox').classList.add('hidden');
+  document.getElementById('nUni').textContent='0 placas';
+  document.getElementById('stepTxt').textContent='recarregando…';
+  fetch('/api/replay',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(Object.assign({},AJUSTE,{run:run,pace:0.004}))})
+  .then(r=>r.json()).then(d=>{
+    if(!d.ok){alert('Não recarregou: '+(d.msg||''));return;}
+    document.getElementById('dot').classList.add('on');
+    if(polling)clearInterval(polling);
+    polling=setInterval(poll,500);poll();
+  }).catch(e=>alert('Erro: '+e));
+}
+document.getElementById('btnLoad').onclick=abrirRodadas;
+
+// ── backup em arquivo (extra; o salvamento principal e' no servidor) ──
+function baixarConf(){
+  const r=placas.map((p,i)=>({i,km:p.km,lado:p.lado,conf:p.conf,n_quadros:p.n_quadros,crop:p.crop,marca:conf[i]||''}));
+  const b=new Blob([JSON.stringify(r,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);
+  a.download='conferencia_'+(RUNNOME||RUNKEY||'rodada')+'.json';a.click();
+}
+document.getElementById('btnSaveConf').onclick=baixarConf;
+document.getElementById('btnLimpar').onclick=()=>{
+  if(!confirm('Limpar a tela pra começar outro projeto?\n\nA conferência atual continua SALVA — você reabre em 📂 Rodadas.'))return;
+  fetch('/api/clear',{method:'POST'}).catch(()=>{});
+  if(polling){clearInterval(polling);polling=null;}
+  placas=[];conf={};RUNKEY='';RUNNOME='';_confLoaded='';
+  selectedFolders=[];renderHdFolders();
+  renderTable();renderTally();
+  document.getElementById('nUni').textContent='0 placas';
+  document.getElementById('evalBox').classList.add('hidden');
+  document.getElementById('mapWrap').classList.add('hidden');
+  document.getElementById('resWrap').classList.add('hidden');
+  document.getElementById('rightIdle').classList.remove('hidden');
+  document.getElementById('progWrap').classList.add('hidden');
+  document.getElementById('leftIdle').classList.remove('hidden');
+  document.getElementById('dot').classList.remove('on');
+};
+document.getElementById('btnImportConf').onclick=()=>document.getElementById('fileImport').click();
+document.getElementById('fileImport').onchange=(e)=>{
+  const f=e.target.files[0];if(!f)return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    try{
+      const arr=JSON.parse(rd.result);const m={};
+      arr.forEach(x=>{if(x.marca)m[cropKey(x.crop)]=x.marca;});
+      let n=0;placas.forEach((p,i)=>{const k=cropKey(p.crop);if(m[k]){conf[i]=m[k];n++;}});
+      saveMarks();renderTable();renderTally();
+      alert('Importei '+n+' marcações (de '+arr.length+' no arquivo).');
+    }catch(err){alert('Arquivo inválido: '+err);}
+    e.target.value='';
+  };
+  rd.readAsText(f);
+};
+
+// ── faixa de avaliacao recall / FP ──
+function renderEval(ev,nDet){
+  const box=document.getElementById('evalBox');
+  if(!ev||ev.erro||ev.sem_overlap){box.classList.add('hidden');return;}
+  box.classList.remove('hidden');
+  const okR=ev.recall>=100, okF=ev.fp_rel<15;
+  box.innerHTML=
+    `<span class="ev ${okR?'good':'bad'}">recall ${ev.recall}% <small>(${ev.achadas}/${ev.n_gt})</small></span>`+
+    `<span class="ev ${okF?'good':'bad'}">FP ${ev.fp_rel}% <small>(${ev.fp} falsos)</small></span>`+
+    `<span class="ev">detecções ${nDet??'—'} → ${ev.n_det} placas</span>`;
+}
+
+// ── sliders ao vivo (conf / min_quadros / area) ──
+let _deb=null;
+function bindSlider(id,key,fmt){
+  const s=document.getElementById(id);if(!s)return;
+  s.addEventListener('input',()=>{
+    AJUSTE[key]=parseFloat(s.value);
+    const lbl=document.getElementById('v'+id.slice(1));
+    if(lbl)lbl.textContent=fmt?fmt(s.value):s.value;
+    clearTimeout(_deb);_deb=setTimeout(refine,180);
+  });
+}
+bindSlider('sConf','conf');
+bindSlider('sMq','min_quadros');
+bindSlider('sArea','min_area',v=>(+v).toFixed(5));
 function renderTable(){
   const tb=document.getElementById('tBody');tb.innerHTML='';
   placas.forEach((p,i)=>{
@@ -447,7 +673,7 @@ function renderTable(){
 }
 function mark(i,tipo){
   if(conf[i]===tipo)delete conf[i];else conf[i]=tipo;
-  renderTable();renderTally();
+  saveMarks();renderTable();renderTally();
 }
 function renderTally(){
   let a=0,b=0;Object.values(conf).forEach(v=>{if(v==='real')a++;else if(v==='falsa')b++;});
@@ -490,6 +716,8 @@ document.getElementById('btnMapa').onclick=()=>{
   if(!w.classList.contains('hidden'))
     fetch('/api/mapa').then(r=>r.json()).then(drawMap);
 };
+document.getElementById('btnMapExpand').onclick=()=>
+  window.open('/mapa','mapa_placas','width=1280,height=860,menubar=no,toolbar=no');
 function drawMap(d){
   const pts=d.track||[],pl=d.placas||[];
   if(!pts.length){alert('Sem GPX — mapa indisponível.');return;}
@@ -501,10 +729,14 @@ function drawMap(d){
   mapLayers.forEach(l=>map.removeLayer(l));mapLayers=[];
   const line=L.polyline(pts,{color:'#3aa0ff',weight:3}).addTo(map);
   mapLayers.push(line);
+  const camIcon=L.divIcon({className:'cam-marker',iconSize:[26,26],iconAnchor:[13,13],
+    html:'<svg viewBox="0 0 24 24" width="26" height="26"><circle cx="12" cy="12" r="11" fill="#2ecc71" stroke="#0b140f" stroke-width="1.2"/><g fill="#0b140f"><path d="M9 7l-.9 1.3H6.3c-.7 0-1.3.6-1.3 1.3v6c0 .7.6 1.3 1.3 1.3h11.4c.7 0 1.3-.6 1.3-1.3v-6c0-.7-.6-1.3-1.3-1.3h-1.8L15 7H9z"/><circle cx="12" cy="12.6" r="2.6" fill="#2ecc71"/></g></svg>'});
   pl.forEach(p=>{
-    const m=L.circleMarker([p.lat,p.lon],
-      {radius:6,color:'#2ecc71',fillColor:'#2ecc71',fillOpacity:.9})
-      .bindPopup('km '+p.km+' · lado '+p.lado).addTo(map);
+    const m=L.marker([p.lat,p.lon],{icon:camIcon})
+      .bindPopup('<div style="font-size:12px;margin-bottom:4px">📷 km '+p.km+' · lado '+p.lado+'</div>'+
+        '<a href="/api/referencia?i='+p.i+'" target="_blank" title="Abrir em tamanho cheio">'+
+        '<img src="/api/referencia?i='+p.i+'" style="width:320px;max-width:78vw;display:block;border-radius:5px"></a>',
+        {maxWidth:360}).addTo(map);
     mapLayers.push(m);
   });
   map.fitBounds(line.getBounds());
