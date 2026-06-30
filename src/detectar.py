@@ -37,9 +37,13 @@ def coleta_imagens(args):
             pasta = pasta.strip().strip('"').strip("'")   # tolera aspas/espacos colados
             if not pasta or not os.path.isdir(pasta):
                 continue
-            # leitura direta (sem glob) p/ aceitar nomes com (), [], espacos etc.
-            achados = [os.path.join(pasta, n) for n in os.listdir(pasta)
-                       if n.lower().endswith(EXTS)]
+            # varre a pasta E subpastas: aponte uma pasta-mae (ex.: TO_010) que
+            # ele pega as imagens de crescente/decrescente juntas. os.walk (sem glob)
+            # tolera nomes com (), [], espacos etc. sorted p/ blocos contiguos por
+            # subpasta -> km monotonico dentro de cada sentido.
+            achados = []
+            for dp, _dn, fn in os.walk(pasta):
+                achados += [os.path.join(dp, n) for n in fn if n.lower().endswith(EXTS)]
             imgs.extend(sorted(achados))
     if args.stride > 1:
         imgs = imgs[::args.stride]

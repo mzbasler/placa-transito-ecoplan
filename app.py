@@ -8,7 +8,7 @@ Arquitetura: a DETECCAO (lenta, CPU) roda uma vez e salva deteccoes.csv + recort
 locais. Tudo o mais (limiar, filtros, avaliacao, mosaico, sequencia, mapa, exportar)
 recalcula na hora a partir desse cache -- por isso o slider responde ao vivo.
 """
-import os, re, csv, json, time, glob, threading, subprocess, webbrowser, urllib.parse, shutil
+import os, re, sys, csv, json, time, glob, threading, subprocess, webbrowser, urllib.parse, shutil
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -76,7 +76,7 @@ def worker(folders, imgsz, limite, preset):
             ESTADO.update({"out": out, "step": "detectando", "processed": 0,
                            "total": 0, "found": 0, "t0": time.time(),
                            "folders": folders, "placas": [], "preview": None})
-        args = ["python", os.path.join(RAIZ, "src", "detectar.py"),
+        args = [sys.executable, os.path.join(RAIZ, "src", "detectar.py"),
                 "--pastas", ";".join(folders), "--stride", "1",
                 "--conf", "0.10", "--imgsz", str(imgsz), "--out", out]
         if limite > 0:
@@ -618,6 +618,23 @@ class H(BaseHTTPRequestHandler):
             self._file_img(max(arqs, key=os.path.getmtime) if arqs else None)
         elif u.path == "/api/file":
             self._file_img((q.get("path", [""])[0]))
+        elif u.path == "/api/baixar":
+            # download de um xlsx gerado, restrito a saidas/ e a extensao .xlsx
+            path = q.get("path", [""])[0]
+            if (not path or not os.path.isfile(path) or not dentro(SAIDAS, path)
+                    or not path.lower().endswith(".xlsx")):
+                self._send(404, "text/plain", b"arquivo nao encontrado"); return
+            with open(path, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{os.path.basename(path)}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
         elif u.path == "/api/referencia":
             i = int(q.get("i", [-1])[0])
             placas = ESTADO.get("placas") or []
@@ -757,6 +774,26 @@ class H(BaseHTTPRequestHandler):
                 if c:
                     n += 1; pasta = os.path.dirname(c)
             self._json({"ok": True, "n": n, "path": pasta})
+        elif u.path == "/api/relatorio":
+            # gera o xlsx (gabarito + conferencia) da rodada atual e devolve o caminho
+            run = (body.get("run") or "").strip()
+            rodada = os.path.join(SAIDAS, run) if run else ESTADO.get("out")
+            if not rodada or not os.path.isdir(rodada):
+                self._json({"ok": False, "msg": "rodada nao encontrada"}, 404); return
+            # garante placas_unicas.csv fresco se a rodada atual esta em memoria
+            if ESTADO.get("out") == rodada and ESTADO.get("placas"):
+                salvar_placas(rodada, ESTADO["placas"])
+            if not os.path.isfile(os.path.join(rodada, "placas_unicas.csv")):
+                self._json({"ok": False, "msg": "rode/recarregue a deteccao primeiro"}, 400); return
+            try:
+                import gerar_relatorio_xlsx as grx
+                r = grx.gerar_relatorio(rodada)
+                r["ok"] = True
+                self._json(r)
+            except SystemExit as e:
+                self._json({"ok": False, "msg": str(e)}, 400)
+            except Exception as e:
+                self._json({"ok": False, "msg": f"{type(e).__name__}: {e}"}, 500)
         else:
             self._send(404, "text/plain", b"nao encontrado")
 

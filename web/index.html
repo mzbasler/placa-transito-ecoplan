@@ -230,6 +230,7 @@
         <button class="sec" id="btnImportConf">📥 Importar</button>
         <input type="file" id="fileImport" accept=".json" style="display:none">
         <button class="sec" id="btnRefs">💾 Salvar referências</button>
+        <button class="sec" id="btnRel" title="Gerar relatório xlsx (gabarito + conferência) da rodada atual">📊 Gerar relatório</button>
         <button class="sec" id="btnMapa">🗺️ Mapa</button>
       </div>
       <div class="tally" id="tally"></div>
@@ -647,6 +648,35 @@ document.getElementById('btnRefs').onclick=()=>{
     if(d.ok)alert('Salvei '+d.n+' fotos em:\n'+d.path);
     else alert('Falha: '+(d.msg||''));
   });
+};
+
+// ── relatório xlsx (gabarito + conferência) ──
+document.getElementById('btnRel').onclick=()=>{
+  if(!RUNKEY){alert('Rode ou recarregue uma detecção primeiro.');return;}
+  const btn=document.getElementById('btnRel');
+  const txt=btn.textContent;btn.textContent='⏳ Gerando…';btn.disabled=true;
+  // salva a conferência atual ANTES (sem debounce) p/ o relatório pegar os ✓/✗ mais novos
+  fetch('/api/conf',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({run:RUNKEY,nome:RUNNOME,marks:marksObj()})})
+  .then(()=>fetch('/api/relatorio',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({run:RUNKEY})}))
+  .then(r=>r.json()).then(d=>{
+    if(!d.ok){alert('Falha ao gerar: '+(d.msg||''));return;}
+    // baixa o arquivo gerado
+    const a=document.createElement('a');
+    a.href='/api/baixar?path='+encodeURIComponent(d.output);a.click();
+    const pct=x=>Math.round(100*x)+'%';
+    let msg='Relatório gerado: '+d.output.split(/[\\/]/).pop()+'\n\n'+
+      'Gabarito: '+d.gabarito+'\n'+
+      'Placas detectadas: '+d.n_det+'  ·  no gabarito (faixa): '+d.n_gt+'\n'+
+      'Detectou '+d.achadas+'  ·  faltaram '+d.faltaram+'  ·  falsos '+d.n_falso+'\n'+
+      'Conferidas: '+d.n_conf+'  (✓'+d.n_real+' ✗'+d.n_falsa+')\n\n'+
+      'Recall '+pct(d.recall)+'  ·  Precisão(gab) '+pct(d.prec_gab)+
+      '  ·  F1 '+pct(d.f1)+'  ·  Precisão(conf) '+pct(d.prec_conf);
+    if(d.n_gt===0)msg+='\n\n⚠ 0 placas do gabarito na faixa das fotos — confira a referência de km do gabarito.';
+    alert(msg);
+  }).catch(e=>alert('Erro: '+e))
+  .finally(()=>{btn.textContent=txt;btn.disabled=false;});
 };
 
 // ── mapa ──

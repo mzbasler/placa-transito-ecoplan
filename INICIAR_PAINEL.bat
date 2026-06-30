@@ -5,5 +5,10 @@ echo  Iniciando o painel de teste de placas...
 echo  O navegador vai abrir sozinho. DEIXE ESTA JANELA ABERTA.
 echo  (feche esta janela quando quiser parar o painel)
 echo.
-python app.py
+if exist ".venv\Scripts\python.exe" (
+  ".venv\Scripts\python.exe" app.py
+) else (
+  echo  [aviso] .venv nao encontrado; usando o python do sistema.
+  python app.py
+)
 pause
