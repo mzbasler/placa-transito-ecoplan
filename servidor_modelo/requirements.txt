@@ -1,0 +1,20 @@
+# Dependencias do SERVIDOR DE INFERENCIA (PC com a RTX 4070, Windows + GPU NVIDIA).
+# NAO instale isto na maquina do painel — la' so' precisa do Python padrao + opencv/numpy.
+#
+# PASSO 1 — instale torch/torchvision casados com a sua CUDA (ex.: cu124) ANTES do resto:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+# PASSO 2 — instale o restante:
+#   pip install -r requirements.txt
+#
+# Observacoes p/ Windows + 4070:
+#   * NAO instale 'magiattention' (so' Linux/Hopper). O servidor forca _attn_implementation="sdpa".
+#   * 'decord' (video) foi omitido de proposito — o backend padrao do processor e' torchvision,
+#     e aqui so' processamos imagens. Adicione decord==0.6.0 manualmente se algum dia precisar de video.
+
+transformers==4.57.1
+opencv-python-headless==4.11.0.86
+numpy==1.25.0
+Pillow==11.1.0
+peft
+lmdb==1.7.5

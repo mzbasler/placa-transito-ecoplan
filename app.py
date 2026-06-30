@@ -18,6 +18,14 @@ DADOS = os.path.join(RAIZ, "dados")
 OUTPUT = os.path.join(RAIZ, "output")   # fotos de referencia (quadro inteiro c/ a caixa)
 ROOT_IMAGENS = r"\\192.168.0.210\Setores\Setor Dev\_TESTES\Placas"
 PORTA = int(os.environ.get("PLACAS_PORT", "8765"))
+# --- branch de teste 'teste-locateanything-nvidia' ---------------------------------
+# A deteccao NAO roda local: ela chama um servidor de inferencia (PC com a RTX 4070)
+# que carrega o modelo nvidia/LocateAnything-3B. Defina o IP:PORTA do servidor em
+# PLACAS_SERVIDOR antes de abrir o painel, ex.:
+#   set PLACAS_SERVIDOR=http://192.168.0.50:8770
+SERVIDOR_MODELO = os.environ.get("PLACAS_SERVIDOR", "")
+DETECTOR_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "src", "detectar_locateanything.py")
 CONF_SOLO = 0.70   # deteccao com conf >= isso vira placa mesmo em poucos quadros (sinal claro)
 # limiares do rastreamento de trajetoria (1 placa fisica = 1 trajetoria de caixas);
 # usados tanto pelo TrackerVivo (ao vivo) quanto por deduplicar (lote/calibracao).
@@ -76,9 +84,10 @@ def worker(folders, imgsz, limite, preset):
             ESTADO.update({"out": out, "step": "detectando", "processed": 0,
                            "total": 0, "found": 0, "t0": time.time(),
                            "folders": folders, "placas": [], "preview": None})
-        args = ["python", os.path.join(RAIZ, "src", "detectar.py"),
+        args = ["python", DETECTOR_SCRIPT,
                 "--pastas", ";".join(folders), "--stride", "1",
-                "--conf", "0.10", "--imgsz", str(imgsz), "--out", out]
+                "--conf", "0.10", "--imgsz", str(imgsz),
+                "--servidor", SERVIDOR_MODELO, "--out", out]
         if limite > 0:
             args += ["--max", str(limite)]
         env = dict(os.environ, PYTHONUNBUFFERED="1", YOLO_VERBOSE="False",
