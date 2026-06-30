@@ -3,11 +3,14 @@
 Gera um xlsx de avaliacao de uma RODADA de deteccao (saidas/PAINEL_*).
 
 Cruza as PLACAS detectadas (placas_unicas.csv) com:
-  - o GABARITO (dados/*.csv: km_abs/km, lado, codigo) -> recall, faltaram, falsos
+  - o GABARITO -> recall, faltaram, falsos. Aceita dois formatos:
+      .xlsx (Comparacao.xlsx do outro projeto, PADRAO): aba 'listagem_arquivos',
+             1 placa real por imagem com Manual=1; o km vem do nome da imagem.
+      .csv  (inventario): 1 linha por placa (km_abs/km, lado, codigo).
   - a CONFERENCIA manual (conferencia.json: cada placa = 'real' (OK) / 'falsa') -> precisao
 
 Saida com 3 abas:
-  comparacao : 1 linha por placa do gabarito -> casou? km_ia, dist, conf, ✓/✗ humano
+  comparacao : 1 linha por placa do gabarito -> codigo/imagem, km, casou? km_ia, dist, ✓/✗
                (placas detectadas FORA do gabarito entram no fim como 'falso positivo')
   placas     : todas as placas detectadas -> km, lado, conf, n_quadros, conferencia, casou
   resumo     : totais + recall, precisao (gabarito), precisao (conferencia), F1
@@ -15,11 +18,11 @@ Saida com 3 abas:
 Uso:
   python gerar_relatorio_xlsx.py --rodada "saidas\\PAINEL_minha_pasta"
   python gerar_relatorio_xlsx.py --rodada "saidas\\PAINEL_x" \
-         --gabarito "dados\\inventario_mt361.csv" --tol-m 30 --output "Relatorio.xlsx"
+         --gabarito "dados\\Comparacao.xlsx" --tol-m 30 --output "Relatorio.xlsx"
 
 Obs.: o km da deteccao vem do nome do arquivo (km absoluto). Se o resumo mostrar
-0 placas na faixa do gabarito, a referencia de km do --gabarito nao bate com a das
-fotos -- troque para o outro arquivo de dados/ ou ajuste --km-col.
+0 placas na faixa do gabarito, o gabarito nao cobre o trecho/estrada das fotos
+(ex.: gabarito do MT-361 com fotos da BR-010) -- use o gabarito certo.
 """
 import os
 import re
@@ -32,7 +35,9 @@ from openpyxl.styles import Font, PatternFill, Alignment
 
 
 RAIZ = os.path.dirname(os.path.abspath(__file__))
-GABARITO_PADRAO = os.path.join(RAIZ, "dados", "inventario_mt361.csv")
+# gabarito padrao = marcacao manual do outro projeto (Comparacao.xlsx, aba
+# 'listagem_arquivos', col Name + Manual). Cada imagem com Manual=1 e' uma placa real.
+GABARITO_PADRAO = os.path.join(RAIZ, "dados", "Comparacao.xlsx")
 
 
 def f(v, default=0.0):
@@ -45,6 +50,12 @@ def f(v, default=0.0):
 def crop_key(caminho):
     """Mesma chave usada pelo painel: so o nome do arquivo do recorte."""
     return re.split(r"[\\/]", str(caminho or ""))[-1]
+
+
+def km_do_nome(nome):
+    """km absoluto = ultimo numero decimal do nome do arquivo (igual ao detector)."""
+    ms = re.findall(r"\d+\.\d+", str(nome or ""))
+    return float(ms[-1]) if ms else None
 
 
 def carregar_placas(rodada):
@@ -80,9 +91,15 @@ def carregar_conferencia(rodada):
         return "", {}
 
 
-def carregar_gabarito(caminho, km_col):
+def carregar_gabarito(caminho, km_col="km_abs", sheet="listagem_arquivos",
+                      header_row=1, col_name="Name", col_manual="Manual"):
+    """Le o gabarito. Suporta dois formatos:
+      .xlsx (Comparacao.xlsx) -> 1 placa real por imagem com Manual=1 (km vem do nome)
+      .csv  (inventario)      -> 1 linha por placa (km_abs/km, lado, codigo)"""
     if not os.path.isfile(caminho):
         raise SystemExit(f"[erro] gabarito nao encontrado: {caminho}")
+    if caminho.lower().endswith((".xlsx", ".xlsm")):
+        return _gabarito_xlsx(caminho, sheet, header_row, col_name, col_manual)
     gt = []
     with open(caminho, encoding="utf-8-sig") as fh:
         for r in csv.DictReader(fh):
@@ -94,6 +111,35 @@ def carregar_gabarito(caminho, km_col):
                 continue
             gt.append({"km": kmv, "lado": (r.get("lado") or "").strip(),
                        "codigo": (r.get("codigo") or "").strip()})
+    return gt
+
+
+def _gabarito_xlsx(caminho, sheet, header_row, col_name, col_manual):
+    wb = openpyxl.load_workbook(caminho, read_only=True, data_only=True)
+    ws = wb[sheet] if sheet in wb.sheetnames else wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if header_row >= len(rows):
+        raise SystemExit(f"[erro] gabarito sem cabecalho na linha {header_row}: {caminho}")
+    hdr = [str(h).strip() if h is not None else "" for h in rows[header_row]]
+    idx = {h: i for i, h in enumerate(hdr)}
+    iN, iM = idx.get(col_name), idx.get(col_manual)
+    if iN is None or iM is None:
+        raise SystemExit(f"[erro] gabarito sem colunas '{col_name}'/'{col_manual}' "
+                         f"na aba '{ws.title}' (cabecalho: {hdr})")
+    gt = []
+    for r in rows[header_row + 1:]:
+        if iN >= len(r) or r[iN] in (None, ""):
+            continue
+        manual = r[iM] if iM < len(r) else None
+        try:
+            if int(f(manual)) != 1:
+                continue
+        except (TypeError, ValueError):
+            continue
+        km = km_do_nome(r[iN])
+        if km is None:
+            continue
+        gt.append({"km": km, "lado": "", "codigo": crop_key(r[iN])})
     return gt
 
 
@@ -217,7 +263,7 @@ def gerar_relatorio(rodada, gabarito=GABARITO_PADRAO, km_col="km_abs",
         ws1.append(["", "", "", round(p["km"], 3), p["lado"], round(p["conf"], 3),
                     "", marca_humana(marks, p), "falso positivo"])
         ws1.cell(ws1.max_row, 9).fill = PatternFill("solid", fgColor=CORES["falso positivo"])
-    for col, w in zip("ABCDEFGHI", (12, 11, 9, 11, 8, 9, 9, 12, 16)):
+    for col, w in zip("ABCDEFGHI", (40, 11, 9, 11, 8, 9, 9, 12, 16)):
         ws1.column_dimensions[col].width = w
 
     # aba 2: todas as placas detectadas
@@ -231,7 +277,7 @@ def gerar_relatorio(rodada, gabarito=GABARITO_PADRAO, km_col="km_abs",
         mk = marks.get(crop_key(p["crop"]))
         if mk in CORES:
             ws2.cell(ws2.max_row, 7).fill = PatternFill("solid", fgColor=CORES[mk])
-    for col, w in zip("ABCDEFGHI", (5, 11, 6, 8, 11, 9, 12, 14, 16)):
+    for col, w in zip("ABCDEFGHI", (5, 11, 6, 8, 11, 9, 12, 40, 16)):
         ws2.column_dimensions[col].width = w
 
     # aba 3: resumo
@@ -278,9 +324,9 @@ def main():
     ap.add_argument("--rodada", required=True,
                     help="pasta da rodada (ex.: saidas\\PAINEL_minha_pasta)")
     ap.add_argument("--gabarito", default=GABARITO_PADRAO,
-                    help="csv do gabarito (km_abs/km, lado, codigo)")
+                    help="gabarito .xlsx (Comparacao.xlsx, padrao) ou .csv (inventario)")
     ap.add_argument("--km-col", default="km_abs",
-                    help="coluna de km do gabarito (padrao: km_abs)")
+                    help="coluna de km do gabarito csv (padrao: km_abs; ignorado p/ xlsx)")
     ap.add_argument("--tol-m", type=float, default=30.0,
                     help="metros max. p/ casar placa detectada ao gabarito (padrao: 30)")
     ap.add_argument("--sem-lado", action="store_true",
@@ -300,8 +346,8 @@ def main():
     print(f"Recall {r['recall']:.1%} - Precisao(gab) {r['prec_gab']:.1%} - "
           f"F1 {r['f1']:.1%} - Precisao(conf) {r['prec_conf']:.1%}")
     if r["n_gt"] == 0:
-        print("[aviso] 0 placas do gabarito na faixa das fotos -- a referencia de km "
-              "do --gabarito provavelmente nao bate. Tente o outro csv de dados/ ou --km-col.")
+        print("[aviso] 0 placas do gabarito na faixa das fotos -- o gabarito nao cobre "
+              "esse trecho/estrada (ex.: gabarito MT-361 x fotos BR-010). Use o certo.")
     print(f"Saida     : {r['output']}")
 
 
