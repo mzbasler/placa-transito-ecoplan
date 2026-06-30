@@ -8,7 +8,7 @@ Arquitetura: a DETECCAO (lenta, CPU) roda uma vez e salva deteccoes.csv + recort
 locais. Tudo o mais (limiar, filtros, avaliacao, mosaico, sequencia, mapa, exportar)
 recalcula na hora a partir desse cache -- por isso o slider responde ao vivo.
 """
-import os, re, csv, json, time, glob, threading, subprocess, webbrowser, urllib.parse, bisect, shutil
+import os, re, csv, json, time, glob, threading, subprocess, webbrowser, urllib.parse, shutil
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -19,6 +19,12 @@ OUTPUT = os.path.join(RAIZ, "output")   # fotos de referencia (quadro inteiro c/
 ROOT_IMAGENS = r"\\192.168.0.210\Setores\Setor Dev\_TESTES\Placas"
 PORTA = int(os.environ.get("PLACAS_PORT", "8765"))
 CONF_SOLO = 0.70   # deteccao com conf >= isso vira placa mesmo em poucos quadros (sinal claro)
+# limiares do rastreamento de trajetoria (1 placa fisica = 1 trajetoria de caixas);
+# usados tanto pelo TrackerVivo (ao vivo) quanto por deduplicar (lote/calibracao).
+MAXGAP = 0.03      # km: vao maximo sem deteccao antes de fechar a placa
+AREA_KEEP = 0.6    # a mesma placa nao encolhe abaixo disso entre quadros
+CX_BACK = 90.0     # px: recuo horizontal tolerado (jitter) antes de virar placa nova
+XSTEP = 700.0      # px: passo horizontal maximo entre quadros da mesma placa
 
 ESTADO = {
     "running": False, "done": False, "error": None, "step": "ocioso",
@@ -133,7 +139,12 @@ def worker(folders, imgsz, limite, preset):
                 with LOCK:
                     ESTADO.update({"processed": proc, "total": tot,
                                    "elapsed_s": int(el), "eta_s": int(eta)})
-            if linha[:6] in ("[prog]", "[info]") or linha.startswith("[ok]"):
+                    nph = ESTADO["found"]
+                # console fidedigno: placas UNICAS ja fechadas (= "Detectadas"), nao a
+                # contagem crua de deteccoes (uma placa rende dezenas de deteccoes).
+                log(f"[prog] {proc}/{tot} quadros · {nph} placas")
+                continue
+            if linha.startswith("[info]"):
                 log(linha)
         empurra(trk.finalizar())   # fecha as placas que sobraram
         p.wait()
@@ -160,11 +171,27 @@ def worker(folders, imgsz, limite, preset):
 
 
 # ------------------------------------------------------------------ conferencia AO VIVO (stream)
+def _montar_placa(g):
+    """Monta o registro de uma placa a partir do grupo de deteccoes: escolhe o melhor
+    quadro (mais proximo + inteiro) e anexa a sequencia de membros em ordem de km."""
+    melhor = sorted(g, key=lambda x: (x["completa"], x["area_frac"]))[-1]
+    membros = [{"km": round(d["km"], 3), "conf": round(d["conf"], 3),
+                "area": round(d["area_frac"], 5), "completa": d["completa"],
+                "crop": d.get("crop", "")} for d in sorted(g, key=lambda x: x["km"])]
+    return {"km": round(melhor["km"], 3), "lado": melhor["lado_img"],
+            "conf": round(melhor["conf"], 4), "area_frac": round(melhor["area_frac"], 6),
+            "completa": melhor["completa"], "n_quadros": len(g),
+            "x1": melhor["x1"], "y1": melhor["y1"], "x2": melhor["x2"], "y2": melhor["y2"],
+            "imagem": melhor["imagem"], "crop": melhor.get("crop", ""), "membros": membros}
+
+
 class TrackerVivo:
     """Agrupa deteccoes em tempo real: cada placa fisica e' uma trajetoria; a placa
-    'fecha' quando o veiculo passa dela (gap de km), e so' ai entra na lista."""
-    MAXGAP = 0.03
-    XTOL = 360.0
+    'fecha' quando o veiculo passa dela (gap de km), e so' ai entra na lista.
+    A MESMA placa so' CRESCE (se aproxima) e ANDA p/ a borda (direita no lado D,
+    esquerda no lado E); detecao que encolheu ou voltou p/ o centro e' OUTRA placa
+    -- e' assim que setas de curva coladas deixam de ser fundidas numa so'.
+    Os limiares (MAXGAP/AREA_KEEP/CX_BACK/XSTEP) sao constantes de modulo."""
 
     def __init__(self, min_quadros):
         self.min_quadros = min_quadros
@@ -175,15 +202,7 @@ class TrackerVivo:
         # vira placa se teve quadros suficientes OU se houve deteccao de ALTA confianca
         if len(g) < self.min_quadros and max(d["conf"] for d in g) < CONF_SOLO:
             return None
-        melhor = sorted(g, key=lambda x: (x["completa"], x["area_frac"]))[-1]
-        membros = [{"km": round(d["km"], 3), "conf": round(d["conf"], 3),
-                    "area": round(d["area_frac"], 5), "completa": d["completa"],
-                    "crop": d.get("crop", "")} for d in sorted(g, key=lambda x: x["km"])]
-        return {"km": round(melhor["km"], 3), "lado": melhor["lado_img"],
-                "conf": round(melhor["conf"], 4), "area_frac": round(melhor["area_frac"], 6),
-                "completa": melhor["completa"], "n_quadros": len(g),
-                "x1": melhor["x1"], "y1": melhor["y1"], "x2": melhor["x2"], "y2": melhor["y2"],
-                "imagem": melhor["imagem"], "crop": melhor.get("crop", ""), "membros": membros}
+        return _montar_placa(g)
 
     def add(self, d):
         """processa 1 deteccao; devolve lista de placas que FECHARAM agora."""
@@ -191,9 +210,10 @@ class TrackerVivo:
         if lado not in self.tracks:
             return []
         d["cx"] = (float(d["x1"]) + float(d["x2"])) / 2.0
+        saida = 1.0 if lado == "D" else -1.0   # sentido em que a placa anda ao se aproximar
         prontas, abertos = [], []
         for t in self.tracks[lado]:
-            if d["km"] - t["last_km"] > self.MAXGAP:   # passou da placa -> fecha
+            if d["km"] - t["last_km"] > MAXGAP:   # passou da placa -> fecha
                 pl = self._finaliza(t)
                 if pl:
                     prontas.append(pl)
@@ -202,13 +222,14 @@ class TrackerVivo:
         self.tracks[lado] = abertos
         melhor_t, melhor_dx = None, 1e9
         for t in self.tracks[lado]:
-            if d["area_frac"] < t["last_area"] * 0.55:
+            # a MESMA placa so cresce; se encolheu muito, e' outra placa (mais ao fundo)
+            if d["area_frac"] < t["last_area"] * AREA_KEEP:
+                continue
+            # ... e so anda p/ a borda; se "voltou" p/ o centro, e' uma placa NOVA
+            if (d["cx"] - t["last_cx"]) * saida < -CX_BACK:
                 continue
             dx = abs(d["cx"] - t["last_cx"])
-            # relaxa o limite horizontal quando a placa cresce (aproxima): o quadro mais
-            # proximo pula pro canto e nao pode se separar do track.
-            tol = self.XTOL * (2.5 if d["area_frac"] >= t["last_area"] else 1.0)
-            if dx <= tol and dx < melhor_dx:
+            if dx <= XSTEP and dx < melhor_dx:
                 melhor_dx, melhor_t = dx, t
         if melhor_t is not None:
             melhor_t["dets"].append(d); melhor_t["last_km"] = d["km"]
@@ -289,66 +310,21 @@ def ler_deteccoes(out):
     return dets
 
 
-def deduplicar(dets, conf, min_quadros, min_asp, max_asp, min_area, janela_km, lado_filtro):
-    """Agrupa deteccoes da MESMA placa fisica rastreando a trajetoria entre quadros
-    (a caixa anda na horizontal e cresce conforme o veiculo se aproxima) e mantem o
-    melhor quadro (mais proximo+inteiro). Cada placa = um objeto fisico coerente, p/ a
-    sequencia de quadros nao misturar objetos diferentes."""
+def deduplicar(dets, conf, min_quadros, min_asp, max_asp, min_area, lado_filtro):
+    """Agrupa deteccoes da MESMA placa fisica e mantem o melhor quadro de cada uma.
+    Reusa o MESMO motor do TrackerVivo (ao vivo): filtra as deteccoes, ordena por km
+    e alimenta o tracker em sequencia -- assim a calibracao (calibrar.py) roda exatamente
+    a logica de producao, sem uma segunda implementacao para divergir."""
     sel = [d for d in dets if d["conf"] >= conf and min_asp <= d["aspecto"] <= max_asp
-           and d["area_frac"] >= min_area]
-    for d in sel:
-        d["cx"] = (float(d["x1"]) + float(d["x2"])) / 2.0   # centro horizontal (px)
-    MAXGAP = 0.03    # km (~30 m): tolera ate ~3 quadros sem deteccao no mesmo objeto
-    XTOL = 360.0     # px: deslocamento horizontal maximo entre quadros p/ ser a MESMA placa
-    grupos = []
-    for lado in ("E", "D"):
-        if lado_filtro in ("E", "D") and lado != lado_filtro:
-            continue
-        seq = sorted([d for d in sel if d["lado_img"] == lado], key=lambda x: x["km"])
-        tracks = []   # {"dets", "last_km", "last_cx", "last_area", "closed"}
-        for d in seq:
-            melhor_t, melhor_dx = None, 1e9
-            for t in tracks:
-                if t["closed"]:
-                    continue
-                if d["km"] - t["last_km"] > MAXGAP:   # objeto ficou para tras -> fecha
-                    t["closed"] = True
-                    continue
-                if d["area_frac"] < t["last_area"] * 0.55:   # encolheu muito -> outra placa
-                    continue
-                dx = abs(d["cx"] - t["last_cx"])
-                # relaxa o limite horizontal quando a placa CRESCE (se aproxima): o quadro
-                # mais proximo pula pro canto da imagem e nao pode se separar do track.
-                tol = XTOL * (2.5 if d["area_frac"] >= t["last_area"] else 1.0)
-                if dx <= tol and dx < melhor_dx:
-                    melhor_dx, melhor_t = dx, t
-            if melhor_t is not None:
-                melhor_t["dets"].append(d)
-                melhor_t["last_km"] = d["km"]; melhor_t["last_cx"] = d["cx"]
-                melhor_t["last_area"] = d["area_frac"]
-            else:
-                tracks.append({"dets": [d], "last_km": d["km"], "last_cx": d["cx"],
-                               "last_area": d["area_frac"], "closed": False})
-        grupos.extend(t["dets"] for t in tracks)
-    # placa = track com quadros suficientes OU com deteccao de ALTA confianca (sinal claro,
-    # nao pode ser descartado so por aparecer em poucos quadros)
-    grupos = [g for g in grupos
-              if len(g) >= min_quadros or max(d["conf"] for d in g) >= CONF_SOLO]
+           and d["area_frac"] >= min_area
+           and (lado_filtro not in ("E", "D") or d["lado_img"] == lado_filtro)]
+    sel.sort(key=lambda d: d["km"])
+    trk = TrackerVivo(min_quadros)
     placas = []
-    for g in grupos:
-        melhor = sorted(g, key=lambda x: (x["completa"], x["area_frac"]))[-1]
-        membros = [{"km": round(d["km"], 3), "conf": round(d["conf"], 3),
-                    "area": round(d["area_frac"], 5), "completa": d["completa"],
-                    "crop": d.get("crop", "")} for d in sorted(g, key=lambda x: x["km"])]
-        placas.append({
-            "km": round(melhor["km"], 3), "lado": melhor["lado_img"],
-            "conf": round(melhor["conf"], 4), "area_frac": round(melhor["area_frac"], 6),
-            "completa": melhor["completa"], "n_quadros": len(g),
-            "x1": melhor["x1"], "y1": melhor["y1"], "x2": melhor["x2"], "y2": melhor["y2"],
-            "imagem": melhor["imagem"], "crop": melhor.get("crop", ""),
-            "membros": membros,
-        })
-    placas.sort(key=lambda x: x["km"])
+    for d in sel:
+        placas.extend(trk.add(d))
+    placas.extend(trk.finalizar())
+    placas.sort(key=lambda x: (x["km"], 0 if x["lado"] == "E" else 1))   # km; desempata E antes de D
     return placas
 
 
@@ -500,59 +476,9 @@ def avaliar(placas, gabarito_path, tol_m, usar_lado):
     return {
         "n_gt": n_gt, "n_det": n_det, "achadas": achadas, "fp": len(falsos),
         "recall": round(100 * achadas / n_gt, 1) if n_gt else 0,
-        "precisao": round(100 * len(usados) / n_det, 1) if n_det else 0,
         "fp_rel": round(100 * len(falsos) / n_gt, 1) if n_gt else 0,
         "faltaram": faltaram[:60], "falsos_idx": falsos,
-        "overlap": [round(ov_lo, 1), round(ov_hi, 1)],
     }
-
-
-# ------------------------------------------------------------------ modo conferencia
-def conferir_gabarito(placas, gabarito_path, tol_m, usar_lado):
-    """Modo conferencia: para CADA placa do gabarito, escolhe o melhor quadro detectado
-    (mais proximo+inteiro) dentro de tol. Placas coladas (mesmo poste) podem compartilhar
-    a mesma deteccao. Devolve so as placas casadas -> recall = cobertura, FP = 0.
-    E' a leitura honesta p/ o objetivo do desafio: achar o melhor quadro de cada placa
-    catalogada. (As deteccoes EXTRAS, de placas reais fora do gabarito, nao entram aqui.)"""
-    if not gabarito_path or not os.path.exists(gabarito_path):
-        return placas, None
-    with open(gabarito_path, encoding="utf-8-sig") as f:
-        gt = list(csv.DictReader(f))
-    for g in gt:
-        try:
-            g["_km"] = float(g.get("km_abs") or g.get("km"))
-        except Exception:
-            g["_km"] = None
-    gt = [g for g in gt if g["_km"] is not None]
-    if not placas or not gt:
-        return placas, {"erro": "sem dados"}
-    tol = tol_m / 1000.0
-    dlo, dhi = min(p["km"] for p in placas), max(p["km"] for p in placas)
-    glo, ghi = min(g["_km"] for g in gt), max(g["_km"] for g in gt)
-    ov_lo, ov_hi = max(dlo, glo), min(dhi, ghi)
-    gtf = [g for g in gt if ov_lo - tol <= g["_km"] <= ov_hi + tol]
-    sel, achadas, faltaram = {}, 0, []
-    for g in gtf:
-        bi, best = None, None
-        for i, p in enumerate(placas):
-            if usar_lado and p.get("lado") and g.get("lado") and p["lado"] != g["lado"]:
-                continue
-            if abs(p["km"] - g["_km"]) <= tol:
-                key = (p["completa"], p["area_frac"])
-                if best is None or key > best:
-                    best, bi = key, i
-        if bi is not None:
-            sel[bi] = placas[bi]; achadas += 1
-        else:
-            faltaram.append({"km": round(g["_km"], 3), "lado": g.get("lado", ""),
-                             "codigo": g.get("codigo", "")})
-    placas_sel = [sel[i] for i in sorted(sel)]
-    n_gt = len(gtf)
-    ev = {"n_gt": n_gt, "n_det": len(placas_sel), "achadas": achadas, "fp": 0,
-          "recall": round(100 * achadas / n_gt, 1) if n_gt else 0,
-          "precisao": 100.0, "fp_rel": 0.0, "faltaram": faltaram[:60],
-          "falsos_idx": [], "overlap": [round(ov_lo, 1), round(ov_hi, 1)], "modo": "conferencia"}
-    return placas_sel, ev
 
 
 # ------------------------------------------------------------------ GPX -> mapa
@@ -690,16 +616,6 @@ class H(BaseHTTPRequestHandler):
             arqs = ([os.path.join(d, x) for x in os.listdir(d) if x.lower().endswith(".jpg")]
                     if d and os.path.isdir(d) else [])
             self._file_img(max(arqs, key=os.path.getmtime) if arqs else None)
-        elif u.path == "/api/mosaico":
-            if out:
-                uni = os.path.join(out, "placas_unicas.csv")
-                if os.path.exists(uni):
-                    subprocess.run(["python", os.path.join(RAIZ, "src", "montagem.py"),
-                                    uni, os.path.join(out, "mosaico"), "--cols", "7",
-                                    "--tile", "200"], capture_output=True, cwd=RAIZ)
-                self._file_img(os.path.join(out, "mosaico", "mosaico_placas.jpg"))
-            else:
-                self._send(404, "text/plain", b"sem run")
         elif u.path == "/api/file":
             self._file_img((q.get("path", [""])[0]))
         elif u.path == "/api/referencia":
@@ -782,29 +698,6 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 ESTADO.update({"running": False, "step": "interrompido", "eta_s": 0})
             self._json({"ok": True})
-        elif u.path == "/api/refine":
-            out = ESTADO.get("out")
-            if not out:
-                self._json({"ok": False, "msg": "rode a deteccao primeiro"}, 400); return
-            dets = ler_deteccoes(out)
-            placas = deduplicar(
-                dets, float(body.get("conf", 0.10)), int(body.get("min_quadros", 1)),
-                float(body.get("min_aspecto", 0.45)), float(body.get("max_aspecto", 4.0)),
-                float(body.get("min_area", 0.0002)), float(body.get("janela_km", 0.06)),
-                body.get("lado", "ambos"))
-            gab = body.get("gabarito", "") or os.path.join(DADOS, "inventario_mt361_kmfoto.csv")
-            if body.get("modo", "normal") == "conferencia":
-                placas, ev = conferir_gabarito(placas, gab, float(body.get("tol_m", 80)),
-                                               bool(body.get("usar_lado", False)))
-            else:
-                ev = avaliar(placas, gab, float(body.get("tol_m", 80)),
-                             bool(body.get("usar_lado", False)))
-            salvar_placas(out, placas)
-            with LOCK:
-                ESTADO["placas"] = placas
-            slim = [{k: v for k, v in p.items() if k != "membros"} for p in placas]
-            self._json({"ok": True, "n": len(placas), "placas": slim, "eval": ev,
-                        "n_det": len(dets)})
         elif u.path == "/api/clear":
             # limpa a tela (estado em memoria) p/ comecar outro projeto.
             # NAO apaga nada do disco: a rodada e a conferencia continuam salvas.
@@ -854,49 +747,6 @@ class H(BaseHTTPRequestHandler):
                     float(body.get("pace", 0.01)))
             threading.Thread(target=replay_worker, args=args, daemon=True).start()
             self._json({"ok": True})
-        elif u.path == "/api/load":
-            # carrega uma rodada JA detectada (deteccoes.csv pronto) sem re-detectar.
-            # aceita caminho absoluto OU nome de pasta dentro de saidas/.
-            alvo = (body.get("out") or body.get("run") or "").strip()
-            cand = alvo if os.path.isabs(alvo) else os.path.join(SAIDAS, alvo)
-            if not alvo or not os.path.exists(os.path.join(cand, "deteccoes.csv")):
-                self._json({"ok": False, "msg": "rodada nao encontrada: " + (alvo or "(vazio)")}, 404); return
-            gab = body.get("gabarito") or os.path.join(DADOS, "inventario_mt361_kmfoto.csv")
-            with LOCK:
-                ESTADO.update({"out": cand, "done": True, "running": False,
-                               "step": "carregado", "folders": body.get("folders") or []})
-            dets = ler_deteccoes(cand)
-            placas = deduplicar(
-                dets, float(body.get("conf", 0.10)), int(body.get("min_quadros", 1)),
-                float(body.get("min_aspecto", 0.45)), float(body.get("max_aspecto", 4.0)),
-                float(body.get("min_area", 0.0002)), float(body.get("janela_km", 0.06)),
-                body.get("lado", "ambos"))
-            if body.get("modo", "normal") == "conferencia":
-                placas, ev = conferir_gabarito(placas, gab, float(body.get("tol_m", 80)),
-                                               bool(body.get("usar_lado", False)))
-            else:
-                ev = avaliar(placas, gab, float(body.get("tol_m", 80)),
-                             bool(body.get("usar_lado", False)))
-            salvar_placas(cand, placas)
-            with LOCK:
-                ESTADO["placas"] = placas
-            slim = [{k: v for k, v in p.items() if k != "membros"} for p in placas]
-            self._json({"ok": True, "n": len(placas), "placas": slim, "eval": ev,
-                        "n_det": len(dets), "out": cand})
-        elif u.path == "/api/export":
-            out = ESTADO.get("out")
-            placas = ESTADO.get("placas") or []
-            rej = set(body.get("rejeitados") or [])
-            sel = [p for i, p in enumerate(placas) if i not in rej]
-            fmt = body.get("formato", "csv")
-            try:
-                if fmt == "xlsx":
-                    cam = exportar_xlsx(out, sel)
-                else:
-                    cam = exportar_csv(out, sel)
-                self._json({"ok": True, "path": cam, "n": len(sel)})
-            except Exception as e:
-                self._json({"ok": False, "msg": str(e)}, 500)
         elif u.path == "/api/salvar_referencias":
             out = ESTADO.get("out"); placas = ESTADO.get("placas") or []
             if not out or not placas:
@@ -909,43 +759,6 @@ class H(BaseHTTPRequestHandler):
             self._json({"ok": True, "n": n, "path": pasta})
         else:
             self._send(404, "text/plain", b"nao encontrado")
-
-
-def exportar_csv(out, placas):
-    cam = os.path.join(out, "INVENTARIO_detectado.csv")
-    with open(cam, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["N", "km", "+m", "Lado", "Confianca", "Completa", "Foto"])
-        for i, p in enumerate(placas, 1):
-            kmint = int(p["km"]); m = int(round((p["km"] - kmint) * 1000))
-            w.writerow([i, kmint, m, p["lado"], f"{p['conf']:.2f}",
-                        "sim" if p["completa"] else "nao", os.path.basename(p.get("crop", ""))])
-    return cam
-
-
-def exportar_xlsx(out, placas):
-    import openpyxl
-    from openpyxl.drawing.image import Image as XLImg
-    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Sinalizacao detectada"
-    ws.append(["N", "Foto", "km", "+m", "Lado", "Confianca", "Completa"])
-    ws.column_dimensions["B"].width = 16
-    for i, p in enumerate(placas, 1):
-        r = i + 1
-        kmint = int(p["km"]); m = int(round((p["km"] - kmint) * 1000))
-        ws.cell(r, 1, i); ws.cell(r, 3, kmint); ws.cell(r, 4, m)
-        ws.cell(r, 5, p["lado"]); ws.cell(r, 6, round(p["conf"], 2))
-        ws.cell(r, 7, "sim" if p["completa"] else "nao")
-        cp = p.get("crop", "")
-        if cp and os.path.exists(cp):
-            try:
-                im = XLImg(cp); im.width = 90; im.height = 90
-                ws.row_dimensions[r].height = 70
-                ws.add_image(im, f"B{r}")
-            except Exception:
-                pass
-    cam = os.path.join(out, "INVENTARIO_detectado.xlsx")
-    wb.save(cam)
-    return cam
 
 
 def main():

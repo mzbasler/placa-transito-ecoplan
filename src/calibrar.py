@@ -54,7 +54,7 @@ def main():
 
     resultados = []
     for conf, mq, ma, mnasp, mxasp in combos:
-        placas = app.deduplicar(dets, conf, mq, mnasp, mxasp, ma, 0.06, "ambos")
+        placas = app.deduplicar(dets, conf, mq, mnasp, mxasp, ma, "ambos")
         ev = app.avaliar(placas, args.gabarito, args.tol_m, usar_lado)
         if not ev or ev.get("erro") or ev.get("sem_overlap"):
             continue
@@ -113,7 +113,7 @@ def main():
                max(resultados, key=lambda r: (r["recall"], -r["fp_rel"])))
     placas = app.deduplicar(dets, escolha["conf"], escolha["min_quadros"],
                             escolha["min_asp"], escolha["max_asp"],
-                            escolha["min_area"], 0.06, "ambos")
+                            escolha["min_area"], "ambos")
     ev = app.avaliar(placas, args.gabarito, args.tol_m, usar_lado)
     print(f"\n### DIAGNOSTICO da config escolhida:\n  " + linha(escolha))
     falt = ev.get("faltaram", [])

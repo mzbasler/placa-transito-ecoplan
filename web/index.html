@@ -94,17 +94,6 @@
     border:1px solid var(--line);border-radius:7px;font-size:12px;cursor:pointer;font-weight:600}
   button.sec:hover{border-color:var(--accent)}
   .tally{font-size:12px;color:var(--muted);flex-shrink:0;min-height:16px}
-  .evalbox{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 2px;flex-shrink:0}
-  .ev{padding:3px 10px;border-radius:7px;font-size:13px;font-weight:700;
-    background:var(--card2);border:1px solid var(--line);color:var(--txt)}
-  .ev small{font-weight:500;color:var(--muted)}
-  .ev.good{background:#173a28;border-color:#2f7d52;color:#7ee2a8}
-  .ev.bad{background:#3a1717;border-color:#7d2f2f;color:#e88}
-  .ctrls{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:4px 0;
-    font-size:12px;color:var(--muted);flex-shrink:0}
-  .ctrls label{display:flex;align-items:center;gap:6px}
-  .ctrls input[type=range]{width:110px}
-  .ctrls b{color:var(--txt);min-width:42px;display:inline-block}
   .rod-item{display:flex;align-items:center;gap:8px;padding:7px 4px;border-bottom:1px solid var(--line)}
   .rod-nome{flex:1;min-width:120px;background:var(--card2);color:var(--txt);
     border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:13px;font-weight:600}
@@ -243,10 +232,6 @@
         <button class="sec" id="btnRefs">💾 Salvar referências</button>
         <button class="sec" id="btnMapa">🗺️ Mapa</button>
       </div>
-      <div id="evalBox" class="evalbox hidden"></div>
-      <!-- preset travado: conf 0.10 / min_quadros 1 / area 0.00003 / janela 0.025 (em AJUSTE).
-           controles ocultos de proposito — o usuario nao precisa configurar nada. -->
-      <div class="ctrls hidden" id="ctrls"></div>
       <div class="tally" id="tally"></div>
       <div class="tabs">
         <div class="tab sel" data-tab="todas">Todas</div>
@@ -317,7 +302,7 @@
 <script src="/vendor/leaflet.js"></script>
 <script>
 const AJUSTE={conf:0.35,min_quadros:3,min_aspecto:0.45,max_aspecto:4.0,
-  min_area:0.0002,janela_km:0.06,lado:"ambos",modo:"normal"};
+  min_area:0.0002,lado:"ambos"};
 const TOL_M=60;  // tolerancia de casamento km (offset survey vs oficial)
 const IMGSZ=1536;
 let polling=null,placas=[],conf={},tab="todas",map=null,mapLayers=[];
@@ -431,7 +416,6 @@ document.getElementById('btnGo').onclick=()=>{
     document.getElementById('progWrap').classList.remove('hidden');
     document.getElementById('rightIdle').classList.add('hidden');
     document.getElementById('resWrap').classList.remove('hidden');
-    document.getElementById('evalBox').classList.add('hidden');
     document.getElementById('btnGo').classList.add('hidden');
     document.getElementById('btnStop').classList.remove('hidden');
     document.getElementById('dot').classList.add('on');
@@ -502,22 +486,6 @@ function puxarPlacasVivo(){
   }).catch(()=>{});
 }
 
-// ── refine (recalcula do cache + avalia recall/FP) ──
-function refineBody(){
-  return Object.assign({},AJUSTE,{tol_m:TOL_M,usar_lado:false});
-}
-function refine(){
-  fetch('/api/refine',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(refineBody())})
-  .then(r=>r.json()).then(d=>{
-    if(!d.ok)return;
-    placas=d.placas||[];conf={};
-    document.getElementById('nUni').textContent=placas.length+' placas';
-    renderEval(d.eval,d.n_det);
-    renderTable();renderTally();
-  });
-}
-
 // ── conferencia (✓/✗) SALVA NO SERVIDOR — ligada a rodada, sobrevive a tudo ──
 let RUNKEY='', RUNNOME='', _saveT=null, _confLoaded='';
 function cropKey(c){return (c||'').split(/[\\/]/).pop();}
@@ -573,7 +541,6 @@ function reloadRun(run){
   document.getElementById('rightIdle').classList.add('hidden');
   document.getElementById('resWrap').classList.remove('hidden');
   document.getElementById('progWrap').classList.remove('hidden');
-  document.getElementById('evalBox').classList.add('hidden');
   document.getElementById('nUni').textContent='0 placas';
   document.getElementById('stepTxt').textContent='recarregando…';
   fetch('/api/replay',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -603,7 +570,6 @@ document.getElementById('btnLimpar').onclick=()=>{
   selectedFolders=[];renderHdFolders();
   renderTable();renderTally();
   document.getElementById('nUni').textContent='0 placas';
-  document.getElementById('evalBox').classList.add('hidden');
   document.getElementById('mapWrap').classList.add('hidden');
   document.getElementById('resWrap').classList.add('hidden');
   document.getElementById('rightIdle').classList.remove('hidden');
@@ -628,32 +594,6 @@ document.getElementById('fileImport').onchange=(e)=>{
   rd.readAsText(f);
 };
 
-// ── faixa de avaliacao recall / FP ──
-function renderEval(ev,nDet){
-  const box=document.getElementById('evalBox');
-  if(!ev||ev.erro||ev.sem_overlap){box.classList.add('hidden');return;}
-  box.classList.remove('hidden');
-  const okR=ev.recall>=100, okF=ev.fp_rel<15;
-  box.innerHTML=
-    `<span class="ev ${okR?'good':'bad'}">recall ${ev.recall}% <small>(${ev.achadas}/${ev.n_gt})</small></span>`+
-    `<span class="ev ${okF?'good':'bad'}">FP ${ev.fp_rel}% <small>(${ev.fp} falsos)</small></span>`+
-    `<span class="ev">detecções ${nDet??'—'} → ${ev.n_det} placas</span>`;
-}
-
-// ── sliders ao vivo (conf / min_quadros / area) ──
-let _deb=null;
-function bindSlider(id,key,fmt){
-  const s=document.getElementById(id);if(!s)return;
-  s.addEventListener('input',()=>{
-    AJUSTE[key]=parseFloat(s.value);
-    const lbl=document.getElementById('v'+id.slice(1));
-    if(lbl)lbl.textContent=fmt?fmt(s.value):s.value;
-    clearTimeout(_deb);_deb=setTimeout(refine,180);
-  });
-}
-bindSlider('sConf','conf');
-bindSlider('sMq','min_quadros');
-bindSlider('sArea','min_area',v=>(+v).toFixed(5));
 function renderTable(){
   const tb=document.getElementById('tBody');tb.innerHTML='';
   placas.forEach((p,i)=>{

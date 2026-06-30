@@ -131,9 +131,8 @@ def main():
             cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), cor, 4)
             cv2.putText(img, f"{conf:.2f}", (int(x1), max(0, int(y1) - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, cor, 3)
-        if img is not None:
-            nome_out = f"km{km:08.3f}_{os.path.basename(caminho)}".replace(" ", "_")
-            cv2.imwrite(os.path.join(args.out, "anotadas", nome_out), img)
+        nome_out = f"km{km:08.3f}_{os.path.basename(caminho)}".replace(" ", "_")
+        cv2.imwrite(os.path.join(args.out, "anotadas", nome_out), img)
         if (i + 1) % 5 == 0:
             print(f"[prog] {i+1}/{len(imgs)} | quadros c/ placa: {quadros_com_det} | deteccoes: {n_det}")
 

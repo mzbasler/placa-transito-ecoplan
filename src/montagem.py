@@ -57,7 +57,6 @@ def main():
 
     cols = args.cols
     rows = math.ceil(len(tiles) / cols)
-    sheet = 255 * (cv2.imread(p["imagem"]) is None)  # placeholder
     import numpy as np
     sheet = np.full((rows * args.tile, cols * args.tile, 3), 40, dtype="uint8")
     for i, t in enumerate(tiles):
